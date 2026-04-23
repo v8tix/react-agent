@@ -5,9 +5,9 @@ import (
 	"encoding/json"
 	"testing"
 
-	llmhandler "github.com/v8tix/mcp-toolkit/handler"
+	"github.com/v8tix/mcp-toolkit/handler"
 	llmmodel "github.com/v8tix/mcp-toolkit/model"
-	llmregistry "github.com/v8tix/mcp-toolkit/registry"
+	"github.com/v8tix/mcp-toolkit/registry"
 
 	"github.com/v8tix/react-agent/mcpadapter"
 	"github.com/v8tix/react-agent/model"
@@ -19,16 +19,16 @@ type echoArgs struct {
 	Message string `json:"message"`
 }
 
-func newEchoTool() llmhandler.ExecutableTool {
-	return llmhandler.NewTool("echo", "Echoes the input message back.",
+func newEchoTool() handler.ExecutableTool {
+	return handler.NewTool("echo", "Echoes the input message back.",
 		func(_ context.Context, in echoArgs) (string, error) {
 			return "echo: " + in.Message, nil
 		},
 	)
 }
 
-func newFailTool() llmhandler.ExecutableTool {
-	return llmhandler.NewTool("fail", "Always returns an error.",
+func newFailTool() handler.ExecutableTool {
+	return handler.NewTool("fail", "Always returns an error.",
 		func(_ context.Context, _ echoArgs) (string, error) {
 			return "", context.DeadlineExceeded
 		},
@@ -38,7 +38,7 @@ func newFailTool() llmhandler.ExecutableTool {
 // ─── Defs ─────────────────────────────────────────────────────────────────────
 
 func TestDefs_ConvertsToolDefinitions(t *testing.T) {
-	reg := llmregistry.New(newEchoTool())
+	reg := registry.New(newEchoTool())
 	defs := mcpadapter.Defs(reg.All())
 
 	if len(defs) != 1 {
@@ -65,7 +65,7 @@ func TestDefs_EmptyRegistry(t *testing.T) {
 // ─── FromRegistry ─────────────────────────────────────────────────────────────
 
 func TestFromRegistry_ReturnsBothDefsAndExecutor(t *testing.T) {
-	reg := llmregistry.New(newEchoTool())
+	reg := registry.New(newEchoTool())
 	defs, executor := mcpadapter.FromRegistry(reg)
 
 	if len(defs) != 1 {
@@ -79,7 +79,7 @@ func TestFromRegistry_ReturnsBothDefsAndExecutor(t *testing.T) {
 // ─── RegistryExecutor.Execute ─────────────────────────────────────────────────
 
 func TestRegistryExecutor_Execute_SingleCall_Success(t *testing.T) {
-	reg := llmregistry.New(newEchoTool())
+	reg := registry.New(newEchoTool())
 	executor := mcpadapter.NewRegistryExecutor(reg)
 
 	args, _ := json.Marshal(echoArgs{Message: "hello"})
@@ -110,7 +110,7 @@ func TestRegistryExecutor_Execute_SingleCall_Success(t *testing.T) {
 }
 
 func TestRegistryExecutor_Execute_ToolNotFound_ReturnsError(t *testing.T) {
-	reg := llmregistry.New(newEchoTool())
+	reg := registry.New(newEchoTool())
 	executor := mcpadapter.NewRegistryExecutor(reg)
 
 	results, err := executor.Execute(context.Background(), []model.ToolCall{
@@ -129,7 +129,7 @@ func TestRegistryExecutor_Execute_ToolNotFound_ReturnsError(t *testing.T) {
 }
 
 func TestRegistryExecutor_Execute_EmptyCalls(t *testing.T) {
-	reg := llmregistry.New(newEchoTool())
+	reg := registry.New(newEchoTool())
 	executor := mcpadapter.NewRegistryExecutor(reg)
 
 	results, err := executor.Execute(context.Background(), nil)
@@ -144,7 +144,7 @@ func TestRegistryExecutor_Execute_EmptyCalls(t *testing.T) {
 func TestRegistryExecutor_Execute_MultipleCalls_OrderPreserved(t *testing.T) {
 	// Two echo tools registered; we call them in a specific order and verify
 	// the results come back in the same order despite concurrent execution.
-	reg := llmregistry.New(newEchoTool())
+	reg := registry.New(newEchoTool())
 	executor := mcpadapter.NewRegistryExecutor(reg)
 
 	calls := []model.ToolCall{
@@ -174,7 +174,7 @@ func TestRegistryExecutor_Execute_MultipleCalls_OrderPreserved(t *testing.T) {
 }
 
 func TestRegistryExecutor_Execute_ToolError_EncodedInResult(t *testing.T) {
-	reg := llmregistry.New(newFailTool())
+	reg := registry.New(newFailTool())
 	executor := mcpadapter.NewRegistryExecutor(reg)
 
 	results, err := executor.Execute(context.Background(), []model.ToolCall{
