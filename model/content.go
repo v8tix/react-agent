@@ -17,7 +17,7 @@ type Message struct {
 }
 
 func (Message) contentItem() {}
-func (Message) Type() string  { return "message" }
+func (Message) Type() string { return "message" }
 
 // ToolCall is a single tool invocation requested by the LLM.
 type ToolCall struct {
@@ -27,7 +27,7 @@ type ToolCall struct {
 }
 
 func (ToolCall) contentItem() {}
-func (ToolCall) Type() string  { return "tool_call" }
+func (ToolCall) Type() string { return "tool_call" }
 
 // ToolResult is the outcome of executing a ToolCall.
 type ToolResult struct {
@@ -38,4 +38,4 @@ type ToolResult struct {
 }
 
 func (ToolResult) contentItem() {}
-func (ToolResult) Type() string  { return "tool_result" }
+func (ToolResult) Type() string { return "tool_result" }

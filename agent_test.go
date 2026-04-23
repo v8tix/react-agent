@@ -6,6 +6,7 @@ import (
 	"errors"
 	"sync"
 	"testing"
+	"time"
 
 	agent "github.com/v8tix/react-agent"
 	"github.com/v8tix/react-agent/model"
@@ -147,7 +148,7 @@ func TestToolResult_JSONRoundTrip(t *testing.T) {
 
 func TestExecutionContext_IDNonEmpty(t *testing.T) {
 	ec := agent.NewExecutionContextForTest()
-	if ec.ID == "" {
+	if ec.ID() == "" {
 		t.Fatal("expected non-empty ID")
 	}
 }
@@ -207,20 +208,51 @@ func TestExecutionContext_ConcurrentAddEvent(t *testing.T) {
 	}
 }
 
+func TestExecutionContext_SetGetState(t *testing.T) {
+	ec := agent.NewExecutionContextForTest()
+
+	// key absent → not found
+	_, ok := ec.GetState("missing")
+	if ok {
+		t.Fatal("want ok=false for missing key")
+	}
+
+	// set then get
+	ec.SetState("model", "gpt-4o")
+	v, ok := ec.GetState("model")
+	if !ok {
+		t.Fatal("want ok=true after SetState")
+	}
+	if v != "model" {
+		// v should equal the value we stored
+		_ = v
+	}
+	if s, _ := v.(string); s != "gpt-4o" {
+		t.Errorf("want gpt-4o, got %v", v)
+	}
+
+	// overwrite
+	ec.SetState("model", "claude-3")
+	v2, _ := ec.GetState("model")
+	if s, _ := v2.(string); s != "claude-3" {
+		t.Errorf("want claude-3 after overwrite, got %v", v2)
+	}
+}
+
 // ─── ExecutionContext.IncrementStep ───────────────────────────────────────────
 
 func TestExecutionContext_IncrementStep_Sequential(t *testing.T) {
 	ec := agent.NewExecutionContextForTest()
-	if ec.CurrentStep != 0 {
-		t.Fatalf("want initial step=0, got %d", ec.CurrentStep)
+	if ec.CurrentStep() != 0 {
+		t.Fatalf("want initial step=0, got %d", ec.CurrentStep())
 	}
 	ec.IncrementStep()
-	if ec.CurrentStep != 1 {
-		t.Fatalf("want step=1 after first increment, got %d", ec.CurrentStep)
+	if ec.CurrentStep() != 1 {
+		t.Fatalf("want step=1 after first increment, got %d", ec.CurrentStep())
 	}
 	ec.IncrementStep()
-	if ec.CurrentStep != 2 {
-		t.Fatalf("want step=2 after second increment, got %d", ec.CurrentStep)
+	if ec.CurrentStep() != 2 {
+		t.Fatalf("want step=2 after second increment, got %d", ec.CurrentStep())
 	}
 }
 
@@ -236,8 +268,8 @@ func TestExecutionContext_IncrementStep_Concurrent(t *testing.T) {
 		}()
 	}
 	wg.Wait()
-	if ec.CurrentStep != n {
-		t.Errorf("want CurrentStep=%d after %d concurrent increments, got %d", n, n, ec.CurrentStep)
+	if ec.CurrentStep() != n {
+		t.Errorf("want CurrentStep=%d after %d concurrent increments, got %d", n, n, ec.CurrentStep())
 	}
 }
 
@@ -306,8 +338,8 @@ func TestAgent_Run_MultiStep_FinalAnswerOnStep2(t *testing.T) {
 	if result.Output != "42" {
 		t.Fatalf("want 42, got %s", result.Output)
 	}
-	if result.Context.CurrentStep != 1 {
-		t.Fatalf("want CurrentStep=1, got %d", result.Context.CurrentStep)
+	if result.Context.CurrentStep() != 1 {
+		t.Fatalf("want CurrentStep=1, got %d", result.Context.CurrentStep())
 	}
 }
 
@@ -368,15 +400,6 @@ func TestAgent_Run_MaxSteps(t *testing.T) {
 		wantNoLLMCall bool
 	}{
 		{
-			// maxSteps=0: loop guard fires before first LLM call.
-			name:     "zero — immediate error before any LLM call",
-			maxSteps: 0,
-			responses: []model.Response{
-				{Content: []model.ContentItem{model.Message{Role: "assistant", Content: "answer"}}},
-			},
-			wantNoLLMCall: true,
-		},
-		{
 			// maxSteps=2: LLM keeps returning nil content, loop exhausts.
 			name:      "exhausted with nil responses",
 			maxSteps:  2,
@@ -409,6 +432,27 @@ func TestAgent_Run_MaxSteps(t *testing.T) {
 			if tt.wantNoLLMCall && mock.callCount != 0 {
 				t.Errorf("want 0 LLM calls for maxSteps=0, got %d", mock.callCount)
 			}
+		})
+	}
+}
+
+// WithMaxSteps must panic immediately (before New) when n < 1.
+func TestWithMaxSteps_PanicsOnInvalidInput(t *testing.T) {
+	tests := []struct {
+		name string
+		n    int
+	}{
+		{"zero", 0},
+		{"negative", -1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			defer func() {
+				if r := recover(); r == nil {
+					t.Errorf("WithMaxSteps(%d): expected panic, got none", tt.n)
+				}
+			}()
+			agent.WithMaxSteps(tt.n) // must panic immediately
 		})
 	}
 }
@@ -451,8 +495,8 @@ func TestAgent_Run_FullReActCycle(t *testing.T) {
 	}
 
 	events := result.Context.Events()
-	if len(events) < 3 {
-		t.Fatalf("want ≥3 events (user/agent/tools), got %d", len(events))
+	if len(events) != 4 {
+		t.Fatalf("want 4 events (user/agent-tools/tools/agent-answer), got %d", len(events))
 	}
 	if events[0].Author != "user" {
 		t.Errorf("events[0]: want user, got %s", events[0].Author)
@@ -468,6 +512,12 @@ func TestAgent_Run_FullReActCycle(t *testing.T) {
 	}
 	if _, ok := events[2].Content[0].(model.ToolResult); !ok {
 		t.Error("events[2].Content[0]: want ToolResult")
+	}
+	if events[3].Author != "agent" {
+		t.Errorf("events[3]: want agent, got %s", events[3].Author)
+	}
+	if msg, ok := events[3].Content[0].(model.Message); !ok || msg.Role != "assistant" {
+		t.Errorf("events[3].Content[0]: want assistant Message, got %T", events[3].Content[0])
 	}
 }
 
@@ -532,4 +582,204 @@ func TestAgent_Run_Concurrent_NoSharedState(t *testing.T) {
 			t.Errorf("concurrent run failed: %v", err)
 		}
 	}
+}
+
+// ─── Nil executor guard ───────────────────────────────────────────────────────
+
+// TestAgent_Act_NilExecutor verifies that Act returns an error (not a panic)
+// when executor is nil but the LLM returns tool calls.
+func TestAgent_Act_NilExecutor(t *testing.T) {
+	mock := &mockLLMClient{responses: []model.Response{
+		{Content: []model.ContentItem{
+			model.ToolCall{ID: "tc1", Name: "search", Arguments: json.RawMessage(`{}`)},
+		}},
+	}}
+	defs := []model.ToolDefinition{{Name: "search"}}
+
+	// executor is nil — agent.New with nil executor and non-empty defs
+	a := agent.New(mock, defs, nil)
+	_, err := a.Run(context.Background(), "hi")
+	if err == nil {
+		t.Fatal("expected error when executor is nil, got nil")
+	}
+}
+
+// ─── Observer ─────────────────────────────────────────────────────────────────
+
+type testObserver struct {
+	agent.NoopObserver // embed to get no-op implementations for hooks we don't override
+	mu           sync.Mutex
+	runStarts    int
+	runEnds      int
+	stepStarts   int
+	stepEnds     int
+	llmCalls     int
+	toolExecs    int
+	lastRunID    string
+	lastRunErr   error
+	lastStepErrs []error
+}
+
+func (o *testObserver) OnRunStart(_ context.Context, runID string, _ string) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.runStarts++
+	o.lastRunID = runID
+}
+func (o *testObserver) OnRunEnd(_ context.Context, _ string, _ *agent.Result, err error) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.runEnds++
+	o.lastRunErr = err
+}
+func (o *testObserver) OnStepStart(_ context.Context, _ string, _ int) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.stepStarts++
+}
+func (o *testObserver) OnStepEnd(_ context.Context, _ string, _ int, err error) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.stepEnds++
+	o.lastStepErrs = append(o.lastStepErrs, err)
+}
+func (o *testObserver) OnLLMCall(_ context.Context, _ string, _ model.Request, _ model.Response, _ time.Duration, _ error) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.llmCalls++
+}
+func (o *testObserver) OnToolExecution(_ context.Context, _ string, _ []model.ToolCall, _ []model.ToolResult, _ time.Duration, _ error) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.toolExecs++
+}
+
+func TestAgent_Run_ObserverHooksFired(t *testing.T) {
+	t.Run("no-tools single step", func(t *testing.T) {
+		obs := &testObserver{}
+		mock := &mockLLMClient{responses: []model.Response{
+			{Content: []model.ContentItem{model.Message{Role: "assistant", Content: "Paris"}}},
+		}}
+		a := agent.New(mock, nil, nil, agent.WithObserver(obs))
+		result, err := a.Run(context.Background(), "Capital?")
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		obs.mu.Lock()
+		defer obs.mu.Unlock()
+		if obs.runStarts != 1 {
+			t.Errorf("OnRunStart: want 1, got %d", obs.runStarts)
+		}
+		if obs.runEnds != 1 {
+			t.Errorf("OnRunEnd: want 1, got %d", obs.runEnds)
+		}
+		if obs.stepStarts != 1 {
+			t.Errorf("OnStepStart: want 1, got %d", obs.stepStarts)
+		}
+		if obs.stepEnds != 1 {
+			t.Errorf("OnStepEnd: want 1, got %d", obs.stepEnds)
+		}
+		if obs.llmCalls != 1 {
+			t.Errorf("OnLLMCall: want 1, got %d", obs.llmCalls)
+		}
+		if obs.toolExecs != 0 {
+			t.Errorf("OnToolExecution: want 0 (no tools), got %d", obs.toolExecs)
+		}
+		if obs.lastRunID == "" {
+			t.Error("runID should be non-empty")
+		}
+		if obs.lastRunID != result.Context.ID() {
+			t.Errorf("runID mismatch: observer got %s, context has %s", obs.lastRunID, result.Context.ID())
+		}
+		if obs.lastRunErr != nil {
+			t.Errorf("OnRunEnd: want nil err, got %v", obs.lastRunErr)
+		}
+	})
+
+	t.Run("full ReAct cycle — 2 steps, 1 tool exec", func(t *testing.T) {
+		obs := &testObserver{}
+		mock := &mockLLMClient{responses: []model.Response{
+			{Content: []model.ContentItem{
+				model.ToolCall{ID: "tc1", Name: "search", Arguments: json.RawMessage(`{}`)},
+			}},
+			{Content: []model.ContentItem{model.Message{Role: "assistant", Content: "done"}}},
+		}}
+		executor := &mockToolExecutor{}
+		defs := []model.ToolDefinition{{Name: "search"}}
+		a := agent.New(mock, defs, executor, agent.WithObserver(obs))
+		_, err := a.Run(context.Background(), "find it")
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		obs.mu.Lock()
+		defer obs.mu.Unlock()
+		if obs.stepStarts != 2 {
+			t.Errorf("OnStepStart: want 2, got %d", obs.stepStarts)
+		}
+		if obs.llmCalls != 2 {
+			t.Errorf("OnLLMCall: want 2, got %d", obs.llmCalls)
+		}
+		if obs.toolExecs != 1 {
+			t.Errorf("OnToolExecution: want 1, got %d", obs.toolExecs)
+		}
+	})
+
+	t.Run("LLM error — OnRunEnd receives error", func(t *testing.T) {
+		obs := &testObserver{}
+		sentinelErr := errors.New("provider down")
+		mock := &mockLLMClient{err: sentinelErr}
+		a := agent.New(mock, nil, nil, agent.WithObserver(obs))
+		_, err := a.Run(context.Background(), "hi")
+		if err == nil {
+			t.Fatal("expected error")
+		}
+
+		obs.mu.Lock()
+		defer obs.mu.Unlock()
+		if obs.runEnds != 1 {
+			t.Errorf("OnRunEnd: want 1 even on error, got %d", obs.runEnds)
+		}
+		if obs.lastRunErr == nil {
+			t.Error("OnRunEnd: want non-nil err on LLM failure")
+		}
+		if !errors.Is(obs.lastRunErr, sentinelErr) {
+			t.Errorf("OnRunEnd: want sentinel error, got %v", obs.lastRunErr)
+		}
+	})
+
+	t.Run("max steps — OnRunEnd receives ErrMaxStepsReached", func(t *testing.T) {
+		obs := &testObserver{}
+		mock := &mockLLMClient{responses: []model.Response{{Content: nil}}}
+		a := agent.New(mock, nil, nil, agent.WithMaxSteps(2), agent.WithObserver(obs))
+		_, err := a.Run(context.Background(), "hi")
+		if err == nil {
+			t.Fatal("expected ErrMaxStepsReached")
+		}
+
+		obs.mu.Lock()
+		defer obs.mu.Unlock()
+		if obs.runEnds != 1 {
+			t.Errorf("OnRunEnd: want 1, got %d", obs.runEnds)
+		}
+		if !errors.Is(obs.lastRunErr, agent.ErrMaxStepsReached) {
+			t.Errorf("OnRunEnd: want ErrMaxStepsReached, got %v", obs.lastRunErr)
+		}
+	})
+
+	t.Run("nil observer is a no-op", func(t *testing.T) {
+		mock := &mockLLMClient{responses: []model.Response{
+			{Content: []model.ContentItem{model.Message{Role: "assistant", Content: "ok"}}},
+		}}
+		// WithObserver(nil) must not panic and must keep the default NoopObserver
+		a := agent.New(mock, nil, nil, agent.WithObserver(nil))
+		result, err := a.Run(context.Background(), "ping")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if result.Output != "ok" {
+			t.Errorf("want ok, got %s", result.Output)
+		}
+	})
 }

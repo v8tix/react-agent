@@ -31,6 +31,7 @@ package agent
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/v8tix/react-agent/model"
 )
@@ -43,19 +44,34 @@ type Agent struct {
 	executor     model.ToolExecutor     // nil is safe when toolDefs is empty
 	instructions string
 	maxSteps     int
+	observer     Observer
 }
 
 // Option is a functional option for configuring an Agent.
 type Option func(*Agent)
 
 // WithMaxSteps overrides the default step limit (10).
+// Panics if n < 1 — zero or negative steps is a programming error.
 func WithMaxSteps(n int) Option {
+	if n < 1 {
+		panic(fmt.Sprintf("agent: WithMaxSteps: n must be >= 1, got %d", n))
+	}
 	return func(a *Agent) { a.maxSteps = n }
 }
 
 // WithInstructions sets the system prompt sent on every LLM request.
 func WithInstructions(s string) Option {
 	return func(a *Agent) { a.instructions = s }
+}
+
+// WithObserver registers an Observer that receives lifecycle hooks for every run.
+// Passing nil is a no-op (the default NoopObserver remains in place).
+func WithObserver(obs Observer) Option {
+	return func(a *Agent) {
+		if obs != nil {
+			a.observer = obs
+		}
+	}
 }
 
 // New creates an Agent.
@@ -67,6 +83,7 @@ func New(client LLMClient, defs []model.ToolDefinition, executor model.ToolExecu
 		toolDefs:  defs,
 		executor:  executor,
 		maxSteps:  10,
+		observer:  NoopObserver{},
 	}
 	for _, opt := range opts {
 		opt(a)
@@ -81,50 +98,77 @@ func (a *Agent) Run(ctx context.Context, userMessage string) (*Result, error) {
 	execCtx := newExecutionContext()
 	execCtx.AddEvent("user", model.Message{Role: "user", Content: userMessage})
 
-	for execCtx.CurrentStep < a.maxSteps {
+	a.observer.OnRunStart(ctx, execCtx.id, userMessage)
+
+	for execCtx.currentStep < a.maxSteps {
 		if err := a.Step(ctx, execCtx); err != nil {
-			return nil, fmt.Errorf("agent step %d: %w", execCtx.CurrentStep, err)
+			err = fmt.Errorf("agent step %d: %w", execCtx.currentStep, err)
+			a.observer.OnRunEnd(ctx, execCtx.id, nil, err)
+			return nil, err
 		}
-		if execCtx.finalResult != nil {
+		if execCtx.Done() {
 			break
 		}
 		execCtx.IncrementStep()
 	}
 
-	if execCtx.finalResult == nil {
-		return nil, fmt.Errorf("%w after %d steps", ErrMaxStepsReached, a.maxSteps)
+	if !execCtx.Done() {
+		err := fmt.Errorf("%w after %d steps", ErrMaxStepsReached, a.maxSteps)
+		a.observer.OnRunEnd(ctx, execCtx.id, nil, err)
+		return nil, err
 	}
 
-	return &Result{
-		Output:     execCtx.finalResult.(string),
+	output, ok := execCtx.FinalResult()
+	if !ok {
+		err := fmt.Errorf("agent: internal error — finalResult type is %T, expected string", execCtx.finalResult)
+		a.observer.OnRunEnd(ctx, execCtx.id, nil, err)
+		return nil, err
+	}
+
+	result := &Result{
+		Output:     output,
 		ToolCalled: anyToolCalled(execCtx),
 		Context:    execCtx,
-	}, nil
+	}
+	a.observer.OnRunEnd(ctx, execCtx.id, result, nil)
+	return result, nil
 }
 
 // Step executes one Think → (optionally) Act cycle, mutating execCtx in place.
 // It is exported so callers can drive the loop manually for streaming,
-// checkpointing, or human-in-the-loop interrupts.
+// checkpointing, or human-in-the-loop interrupts. Use execCtx.Done() to check
+// whether the agent produced a final answer.
 func (a *Agent) Step(ctx context.Context, execCtx *ExecutionContext) error {
+	a.observer.OnStepStart(ctx, execCtx.id, execCtx.currentStep)
+
 	resp, err := a.Think(ctx, execCtx)
 	if err != nil {
+		a.observer.OnStepEnd(ctx, execCtx.id, execCtx.currentStep, err)
 		return err
 	}
 
 	toolCalls := collectToolCalls(resp.Content)
 	if len(toolCalls) == 0 {
 		if msg := extractAssistantMessage(resp.Content); msg != "" {
-			execCtx.finalResult = msg
+			execCtx.AddEvent("agent", model.Message{Role: "assistant", Content: msg})
+			execCtx.setFinalResult(msg)
 		}
+		a.observer.OnStepEnd(ctx, execCtx.id, execCtx.currentStep, nil)
 		return nil
 	}
 
-	return a.Act(ctx, execCtx, toolCalls)
+	err = a.Act(ctx, execCtx, toolCalls)
+	a.observer.OnStepEnd(ctx, execCtx.id, execCtx.currentStep, err)
+	return err
 }
 
 // Think calls the LLM with the current execution context and returns its response.
 func (a *Agent) Think(ctx context.Context, execCtx *ExecutionContext) (model.Response, error) {
-	return a.llmClient.Generate(ctx, a.prepareRequest(execCtx))
+	req := a.prepareRequest(execCtx)
+	start := time.Now()
+	resp, err := a.llmClient.Generate(ctx, req)
+	a.observer.OnLLMCall(ctx, execCtx.id, req, resp, time.Since(start), err)
+	return resp, err
 }
 
 // Act executes all requested tool calls via ToolExecutor and records the results.
@@ -135,9 +179,19 @@ func (a *Agent) Act(ctx context.Context, execCtx *ExecutionContext, calls []mode
 	for i, tc := range calls {
 		callItems[i] = tc
 	}
+	// Record the tool-call decision before attempting execution so the event log
+	// is accurate even if the executor is nil or returns an error.
 	execCtx.AddEvent("agent", callItems...)
 
+	if a.executor == nil {
+		err := fmt.Errorf("agent: cannot execute tools — ToolExecutor is nil")
+		a.observer.OnToolExecution(ctx, execCtx.id, calls, nil, 0, err)
+		return err
+	}
+
+	start := time.Now()
 	results, err := a.executor.Execute(ctx, calls)
+	a.observer.OnToolExecution(ctx, execCtx.id, calls, results, time.Since(start), err)
 	if err != nil {
 		return fmt.Errorf("act execute: %w", err)
 	}
