@@ -1,10 +1,10 @@
-package agent
+package model
 
 import "encoding/json"
 
-// ContentItem is the discriminated union of all items that can appear in an Event.
-// The unexported marker method prevents external packages from implementing it,
-// keeping the union closed and type-switch exhaustive.
+// ContentItem is a closed discriminated union of all values that can appear
+// in an Event. The unexported marker method prevents external packages from
+// satisfying the interface, keeping type switches exhaustive.
 type ContentItem interface {
 	contentItem()
 	Type() string

@@ -8,6 +8,7 @@ import (
 
 	"github.com/openai/openai-go"
 	"github.com/openai/openai-go/packages/param"
+	"github.com/v8tix/react-agent/model"
 )
 
 // thinkRe strips Qwen3 / reasoning-model chain-of-thought blocks so they don't
@@ -18,31 +19,12 @@ func stripThinkTokens(s string) string {
 	return strings.TrimSpace(thinkRe.ReplaceAllString(s, ""))
 }
 
-// ─── Request / Response ──────────────────────────────────────────────────────
-
-// Request is the agent's view of a single LLM call.
-// Events carries the full conversation history; the LLMClient translates
-// each Event into the provider-specific message format.
-type Request struct {
-	Instructions string
-	Events       []Event
-	Tools        []ToolDefinition
-	MaxTokens    int64
-}
-
-// Response is the agent's view of a single LLM reply.
-// Content contains either ToolCall items (when the model wants to act) or a
-// single Message item with Role "assistant" (when the model has an answer).
-type Response struct {
-	Content []ContentItem
-}
-
 // ─── LLMClient interface ─────────────────────────────────────────────────────
 
 // LLMClient abstracts communication with a language model.
 // Implement this interface to support any LLM provider.
 type LLMClient interface {
-	Generate(ctx context.Context, req Request) (Response, error)
+	Generate(ctx context.Context, req model.Request) (model.Response, error)
 }
 
 // ─── LiteLLMClient (openai-go adapter) ───────────────────────────────────────
@@ -61,7 +43,7 @@ func NewLiteLLMClient(client *openai.Client, model openai.ChatModel) *LiteLLMCli
 
 // Generate translates a Request into an OpenAI chat completion and maps the
 // response back to ContentItem types.
-func (c *LiteLLMClient) Generate(ctx context.Context, req Request) (Response, error) {
+func (c *LiteLLMClient) Generate(ctx context.Context, req model.Request) (model.Response, error) {
 	messages := buildMessages(req.Instructions, req.Events)
 	toolParams := toOpenAIToolParams(req.Tools)
 
@@ -77,10 +59,10 @@ func (c *LiteLLMClient) Generate(ctx context.Context, req Request) (Response, er
 		MaxCompletionTokens: openai.Int(maxTokens),
 	})
 	if err != nil {
-		return Response{}, fmt.Errorf("litellm generate: %w", err)
+		return model.Response{}, fmt.Errorf("litellm generate: %w", err)
 	}
 	if len(resp.Choices) == 0 {
-		return Response{}, fmt.Errorf("litellm generate: empty choices")
+		return model.Response{}, fmt.Errorf("litellm generate: empty choices")
 	}
 
 	return parseResponse(resp.Choices[0].Message), nil
@@ -99,7 +81,7 @@ func (c *LiteLLMClient) Generate(ctx context.Context, req Request) (Response, er
 //
 // Processing by event (not by flat ContentItem) is critical: OpenAI rejects
 // requests where tool calls appear outside an AssistantMessage.ToolCalls array.
-func buildMessages(instructions string, events []Event) []openai.ChatCompletionMessageParamUnion {
+func buildMessages(instructions string, events []model.Event) []openai.ChatCompletionMessageParamUnion {
 	msgs := make([]openai.ChatCompletionMessageParamUnion, 0, len(events)+1)
 
 	if instructions != "" {
@@ -110,7 +92,7 @@ func buildMessages(instructions string, events []Event) []openai.ChatCompletionM
 		switch event.Author {
 		case "user":
 			for _, item := range event.Content {
-				if m, ok := item.(Message); ok {
+				if m, ok := item.(model.Message); ok {
 					msgs = append(msgs, openai.UserMessage(m.Content))
 				}
 			}
@@ -136,7 +118,7 @@ func buildMessages(instructions string, events []Event) []openai.ChatCompletionM
 				})
 			} else {
 				for _, item := range event.Content {
-					if m, ok := item.(Message); ok && m.Role == "assistant" {
+					if m, ok := item.(model.Message); ok && m.Role == "assistant" {
 						msgs = append(msgs, openai.AssistantMessage(m.Content))
 					}
 				}
@@ -144,7 +126,7 @@ func buildMessages(instructions string, events []Event) []openai.ChatCompletionM
 
 		case "tools":
 			for _, item := range event.Content {
-				if tr, ok := item.(ToolResult); ok {
+				if tr, ok := item.(model.ToolResult); ok {
 					msgs = append(msgs, openai.ToolMessage(
 						strings.Join(tr.Content, "\n"),
 						tr.ID,
@@ -158,25 +140,25 @@ func buildMessages(instructions string, events []Event) []openai.ChatCompletionM
 }
 
 // parseResponse converts an OpenAI chat message into ContentItem types.
-func parseResponse(msg openai.ChatCompletionMessage) Response {
+func parseResponse(msg openai.ChatCompletionMessage) model.Response {
 	if len(msg.ToolCalls) > 0 {
-		items := make([]ContentItem, len(msg.ToolCalls))
+		items := make([]model.ContentItem, len(msg.ToolCalls))
 		for i, tc := range msg.ToolCalls {
-			items[i] = ToolCall{
+			items[i] = model.ToolCall{
 				ID:        tc.ID,
 				Name:      tc.Function.Name,
 				Arguments: []byte(tc.Function.Arguments),
 			}
 		}
-		return Response{Content: items}
+		return model.Response{Content: items}
 	}
 
 	text := stripThinkTokens(msg.Content)
-	return Response{Content: []ContentItem{Message{Role: "assistant", Content: text}}}
+	return model.Response{Content: []model.ContentItem{model.Message{Role: "assistant", Content: text}}}
 }
 
 // toOpenAIToolParams converts ToolDefinitions to the OpenAI tool param format.
-func toOpenAIToolParams(defs []ToolDefinition) []openai.ChatCompletionToolParam {
+func toOpenAIToolParams(defs []model.ToolDefinition) []openai.ChatCompletionToolParam {
 	if len(defs) == 0 {
 		return nil
 	}
@@ -194,10 +176,10 @@ func toOpenAIToolParams(defs []ToolDefinition) []openai.ChatCompletionToolParam 
 	return params
 }
 
-func collectToolCalls(items []ContentItem) []ToolCall {
-	var out []ToolCall
+func collectToolCalls(items []model.ContentItem) []model.ToolCall {
+	var out []model.ToolCall
 	for _, item := range items {
-		if tc, ok := item.(ToolCall); ok {
+		if tc, ok := item.(model.ToolCall); ok {
 			out = append(out, tc)
 		}
 	}

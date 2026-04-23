@@ -7,16 +7,17 @@ import (
 	"testing"
 
 	agent "github.com/v8tix/react-agent"
+	"github.com/v8tix/react-agent/model"
 )
 
 // ─── mockLLMClient ────────────────────────────────────────────────────────────
 
 type mockLLMClient struct {
-	responses []agent.Response
+	responses []model.Response
 	callCount int
 }
 
-func (m *mockLLMClient) Generate(_ context.Context, _ agent.Request) (agent.Response, error) {
+func (m *mockLLMClient) Generate(_ context.Context, _ model.Request) (model.Response, error) {
 	resp := m.responses[m.callCount%len(m.responses)]
 	m.callCount++
 	return resp, nil
@@ -25,33 +26,33 @@ func (m *mockLLMClient) Generate(_ context.Context, _ agent.Request) (agent.Resp
 // ─── ContentItem tests ────────────────────────────────────────────────────────
 
 func TestMessage_Type(t *testing.T) {
-	m := agent.Message{Role: "user", Content: "hello"}
+	m := model.Message{Role: "user", Content: "hello"}
 	if m.Type() != "message" {
 		t.Fatalf("want message, got %s", m.Type())
 	}
 }
 
 func TestToolCall_Type(t *testing.T) {
-	tc := agent.ToolCall{ID: "1", Name: "search", Arguments: json.RawMessage(`{}`)}
+	tc := model.ToolCall{ID: "1", Name: "search", Arguments: json.RawMessage(`{}`)}
 	if tc.Type() != "tool_call" {
 		t.Fatalf("want tool_call, got %s", tc.Type())
 	}
 }
 
 func TestToolResult_Type(t *testing.T) {
-	tr := agent.ToolResult{ID: "1", Name: "search", Status: "success"}
+	tr := model.ToolResult{ID: "1", Name: "search", Status: "success"}
 	if tr.Type() != "tool_result" {
 		t.Fatalf("want tool_result, got %s", tr.Type())
 	}
 }
 
 func TestMessage_JSONRoundTrip(t *testing.T) {
-	original := agent.Message{Role: "assistant", Content: "Paris"}
+	original := model.Message{Role: "assistant", Content: "Paris"}
 	b, err := json.Marshal(original)
 	if err != nil {
 		t.Fatal(err)
 	}
-	var decoded agent.Message
+	var decoded model.Message
 	if err := json.Unmarshal(b, &decoded); err != nil {
 		t.Fatal(err)
 	}
@@ -64,8 +65,8 @@ func TestMessage_JSONRoundTrip(t *testing.T) {
 
 func TestExecutionContext_AddEvent_AppendsInOrder(t *testing.T) {
 	ec := agent.NewExecutionContextForTest()
-	ec.AddEvent("user", agent.Message{Role: "user", Content: "Q"})
-	ec.AddEvent("agent", agent.Message{Role: "assistant", Content: "A"})
+	ec.AddEvent("user", model.Message{Role: "user", Content: "Q"})
+	ec.AddEvent("agent", model.Message{Role: "assistant", Content: "A"})
 
 	events := ec.Events()
 	if len(events) != 2 {
@@ -78,7 +79,7 @@ func TestExecutionContext_AddEvent_AppendsInOrder(t *testing.T) {
 
 func TestExecutionContext_Events_DefensiveCopy(t *testing.T) {
 	ec := agent.NewExecutionContextForTest()
-	ec.AddEvent("user", agent.Message{Role: "user", Content: "hi"})
+	ec.AddEvent("user", model.Message{Role: "user", Content: "hi"})
 
 	e1 := ec.Events()
 	e1[0].Author = "mutated"
@@ -98,8 +99,8 @@ func TestExecutionContext_IDNonEmpty(t *testing.T) {
 
 func TestExecutionContext_EventIDs_Unique(t *testing.T) {
 	ec := agent.NewExecutionContextForTest()
-	ec.AddEvent("user", agent.Message{Role: "user", Content: "a"})
-	ec.AddEvent("agent", agent.Message{Role: "assistant", Content: "b"})
+	ec.AddEvent("user", model.Message{Role: "user", Content: "a"})
+	ec.AddEvent("agent", model.Message{Role: "assistant", Content: "b"})
 
 	events := ec.Events()
 	if events[0].ID == events[1].ID {
@@ -116,7 +117,7 @@ func TestExecutionContext_ConcurrentAddEvent(t *testing.T) {
 	for i := 0; i < n; i++ {
 		go func() {
 			defer wg.Done()
-			ec.AddEvent("agent", agent.Message{Role: "assistant", Content: "concurrent"})
+			ec.AddEvent("agent", model.Message{Role: "assistant", Content: "concurrent"})
 		}()
 	}
 	wg.Wait()
@@ -130,8 +131,8 @@ func TestExecutionContext_ConcurrentAddEvent(t *testing.T) {
 
 func TestAgent_Run_NoTools_ReturnsAnswer(t *testing.T) {
 	mock := &mockLLMClient{
-		responses: []agent.Response{
-			{Content: []agent.ContentItem{agent.Message{Role: "assistant", Content: "Paris"}}},
+		responses: []model.Response{
+			{Content: []model.ContentItem{model.Message{Role: "assistant", Content: "Paris"}}},
 		},
 	}
 	a := agent.New(mock, nil, nil, agent.WithInstructions("You are helpful"))
@@ -152,7 +153,7 @@ func TestAgent_Run_NoTools_ReturnsAnswer(t *testing.T) {
 
 func TestAgent_Run_MaxStepsExhausted_ReturnsError(t *testing.T) {
 	mock := &mockLLMClient{
-		responses: []agent.Response{{Content: nil}},
+		responses: []model.Response{{Content: nil}},
 	}
 	a := agent.New(mock, nil, nil, agent.WithMaxSteps(2))
 	_, err := a.Run(context.Background(), "hello")
@@ -177,8 +178,8 @@ func TestAgent_Run_MaxStepsExhausted_ReturnsError(t *testing.T) {
 
 func TestAgent_Run_ContextContainsUserMessage(t *testing.T) {
 	mock := &mockLLMClient{
-		responses: []agent.Response{
-			{Content: []agent.ContentItem{agent.Message{Role: "assistant", Content: "ok"}}},
+		responses: []model.Response{
+			{Content: []model.ContentItem{model.Message{Role: "assistant", Content: "ok"}}},
 		},
 	}
 	a := agent.New(mock, nil, nil)
@@ -190,7 +191,7 @@ func TestAgent_Run_ContextContainsUserMessage(t *testing.T) {
 	if len(events) == 0 {
 		t.Fatal("expected events")
 	}
-	msg, ok := events[0].Content[0].(agent.Message)
+	msg, ok := events[0].Content[0].(model.Message)
 	if !ok {
 		t.Fatal("first content item should be a Message")
 	}
@@ -201,9 +202,9 @@ func TestAgent_Run_ContextContainsUserMessage(t *testing.T) {
 
 func TestAgent_Run_MultiStep_FinalAnswerOnStep2(t *testing.T) {
 	mock := &mockLLMClient{
-		responses: []agent.Response{
+		responses: []model.Response{
 			{Content: nil},
-			{Content: []agent.ContentItem{agent.Message{Role: "assistant", Content: "42"}}},
+			{Content: []model.ContentItem{model.Message{Role: "assistant", Content: "42"}}},
 		},
 	}
 	a := agent.New(mock, nil, nil, agent.WithMaxSteps(5))

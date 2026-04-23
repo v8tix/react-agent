@@ -9,8 +9,8 @@ import (
 	llmmodel "github.com/v8tix/mcp-toolkit/model"
 	llmregistry "github.com/v8tix/mcp-toolkit/registry"
 
-	agent "github.com/v8tix/react-agent"
 	"github.com/v8tix/react-agent/mcpadapter"
+	"github.com/v8tix/react-agent/model"
 )
 
 // ─── test tool ────────────────────────────────────────────────────────────────
@@ -83,7 +83,7 @@ func TestRegistryExecutor_Execute_SingleCall_Success(t *testing.T) {
 	executor := mcpadapter.NewRegistryExecutor(reg)
 
 	args, _ := json.Marshal(echoArgs{Message: "hello"})
-	results, err := executor.Execute(context.Background(), []agent.ToolCall{
+	results, err := executor.Execute(context.Background(), []model.ToolCall{
 		{ID: "call-1", Name: "echo", Arguments: args},
 	})
 
@@ -113,7 +113,7 @@ func TestRegistryExecutor_Execute_ToolNotFound_ReturnsError(t *testing.T) {
 	reg := llmregistry.New(newEchoTool())
 	executor := mcpadapter.NewRegistryExecutor(reg)
 
-	results, err := executor.Execute(context.Background(), []agent.ToolCall{
+	results, err := executor.Execute(context.Background(), []model.ToolCall{
 		{ID: "call-1", Name: "nonexistent", Arguments: json.RawMessage(`{}`)},
 	})
 
@@ -147,7 +147,7 @@ func TestRegistryExecutor_Execute_MultipleCalls_OrderPreserved(t *testing.T) {
 	reg := llmregistry.New(newEchoTool())
 	executor := mcpadapter.NewRegistryExecutor(reg)
 
-	calls := []agent.ToolCall{
+	calls := []model.ToolCall{
 		{ID: "c1", Name: "echo", Arguments: mustMarshal(echoArgs{Message: "first"})},
 		{ID: "c2", Name: "echo", Arguments: mustMarshal(echoArgs{Message: "second"})},
 		{ID: "c3", Name: "echo", Arguments: mustMarshal(echoArgs{Message: "third"})},
@@ -177,7 +177,7 @@ func TestRegistryExecutor_Execute_ToolError_EncodedInResult(t *testing.T) {
 	reg := llmregistry.New(newFailTool())
 	executor := mcpadapter.NewRegistryExecutor(reg)
 
-	results, err := executor.Execute(context.Background(), []agent.ToolCall{
+	results, err := executor.Execute(context.Background(), []model.ToolCall{
 		{ID: "c1", Name: "fail", Arguments: mustMarshal(echoArgs{Message: "x"})},
 	})
 

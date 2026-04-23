@@ -1,6 +1,6 @@
 // Package mcpadapter bridges github.com/v8tix/mcp-toolkit with react-agent.
 //
-// It provides RegistryExecutor — a concurrent, retry-aware agent.ToolExecutor
+// It provides RegistryExecutor — a concurrent, retry-aware model.ToolExecutor
 // backed by a mcp-toolkit registry.Registry. Tools that implement
 // observable.Tool are executed via ExecuteRx (retry + exponential backoff);
 // plain handler.ExecutableTool implementations fall back to a simple
@@ -32,7 +32,7 @@ import (
 	"github.com/v8tix/mcp-toolkit/observable"
 	llmregistry "github.com/v8tix/mcp-toolkit/registry"
 
-	agent "github.com/v8tix/react-agent"
+	"github.com/v8tix/react-agent/model"
 )
 
 // indexedResult pairs a call-order index with its resolved ToolResult so that
@@ -40,10 +40,10 @@ import (
 // order (i.e. fastest tools first).
 type indexedResult struct {
 	idx    int
-	result agent.ToolResult
+	result model.ToolResult
 }
 
-// RegistryExecutor implements agent.ToolExecutor using mcp-toolkit's concurrent
+// RegistryExecutor implements model.ToolExecutor using mcp-toolkit's concurrent
 // observable dispatch with retry and exponential backoff.
 //
 // Use NewRegistryExecutor to construct one, or call FromRegistry for a
@@ -57,14 +57,14 @@ func NewRegistryExecutor(reg *llmregistry.Registry) *RegistryExecutor {
 	return &RegistryExecutor{reg: reg}
 }
 
-// Defs converts a slice of mcp-toolkit ToolDefinitions to agent.ToolDefinitions.
+// Defs converts a slice of mcp-toolkit ToolDefinitions to model.ToolDefinitions.
 // Pass the result as the defs argument to agent.New().
 //
 //	defs := mcpadapter.Defs(reg.All())
-func Defs(defs []llmmodel.ToolDefinition) []agent.ToolDefinition {
-	result := make([]agent.ToolDefinition, len(defs))
+func Defs(defs []llmmodel.ToolDefinition) []model.ToolDefinition {
+	result := make([]model.ToolDefinition, len(defs))
 	for i, d := range defs {
-		result[i] = agent.ToolDefinition{
+		result[i] = model.ToolDefinition{
 			Name:        d.Function.Name,
 			Description: d.Function.Description,
 			Parameters:  d.Function.Parameters.ToMap(),
@@ -79,17 +79,17 @@ func Defs(defs []llmmodel.ToolDefinition) []agent.ToolDefinition {
 //
 //	defs, executor := mcpadapter.FromRegistry(reg)
 //	a := agent.New(client, defs, executor, agent.WithInstructions("..."))
-func FromRegistry(reg *llmregistry.Registry) ([]agent.ToolDefinition, agent.ToolExecutor) {
+func FromRegistry(reg *llmregistry.Registry) ([]model.ToolDefinition, model.ToolExecutor) {
 	return Defs(reg.All()), NewRegistryExecutor(reg)
 }
 
 // Execute fans out all tool calls concurrently via rxgo.Merge, waits for all
-// results, restores the original call order, and returns []agent.ToolResult.
+// results, restores the original call order, and returns []model.ToolResult.
 //
 // Errors are never returned as Go errors — they are encoded into
 // ToolResult.Status="error" so the agent loop can always continue the
 // conversation and let the LLM reason about the failure.
-func (e *RegistryExecutor) Execute(ctx context.Context, calls []agent.ToolCall) ([]agent.ToolResult, error) {
+func (e *RegistryExecutor) Execute(ctx context.Context, calls []model.ToolCall) ([]model.ToolResult, error) {
 	if len(calls) == 0 {
 		return nil, nil
 	}
@@ -113,7 +113,7 @@ func (e *RegistryExecutor) Execute(ctx context.Context, calls []agent.ToolCall) 
 
 	sort.Slice(indexed, func(i, j int) bool { return indexed[i].idx < indexed[j].idx })
 
-	results := make([]agent.ToolResult, len(indexed))
+	results := make([]model.ToolResult, len(indexed))
 	for i, r := range indexed {
 		results[i] = r.result
 	}
@@ -123,9 +123,9 @@ func (e *RegistryExecutor) Execute(ctx context.Context, calls []agent.ToolCall) 
 // callObservable builds a cold rxgo.Observable for a single tool call.
 // It emits exactly one indexedResult — never an error — so rxgo.Merge can
 // always collect a result for every call regardless of failure.
-func (e *RegistryExecutor) callObservable(ctx context.Context, idx int, call agent.ToolCall) rxgo.Observable {
+func (e *RegistryExecutor) callObservable(ctx context.Context, idx int, call model.ToolCall) rxgo.Observable {
 	errorResult := func(msg string) rxgo.Observable {
-		return rxgo.Just(indexedResult{idx, agent.ToolResult{
+		return rxgo.Just(indexedResult{idx, model.ToolResult{
 			ID:      call.ID,
 			Name:    call.Name,
 			Status:  "error",
@@ -168,14 +168,14 @@ func (e *RegistryExecutor) callObservable(ctx context.Context, idx int, call age
 	return source.Map(func(_ context.Context, item any) (any, error) {
 		content, err := json.Marshal(item)
 		if err != nil {
-			return indexedResult{idx, agent.ToolResult{
+			return indexedResult{idx, model.ToolResult{
 				ID:      call.ID,
 				Name:    call.Name,
 				Status:  "error",
 				Content: []string{fmt.Sprintf("result serialisation error: %s", err.Error())},
 			}}, nil
 		}
-		return indexedResult{idx, agent.ToolResult{
+		return indexedResult{idx, model.ToolResult{
 			ID:      call.ID,
 			Name:    call.Name,
 			Status:  "success",
@@ -183,7 +183,7 @@ func (e *RegistryExecutor) callObservable(ctx context.Context, idx int, call age
 		}}, nil
 	}, rxgo.WithErrorStrategy(rxgo.ContinueOnError)).
 		OnErrorReturn(func(err error) any {
-			return indexedResult{idx, agent.ToolResult{
+			return indexedResult{idx, model.ToolResult{
 				ID:      call.ID,
 				Name:    call.Name,
 				Status:  "error",

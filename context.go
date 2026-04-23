@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"sync"
 	"time"
+
+	"github.com/v8tix/react-agent/model"
 )
 
 // ExecutionContext is the central mutable state for one agent run.
@@ -16,7 +18,7 @@ type ExecutionContext struct {
 	ID          string
 	CurrentStep int
 	State       map[string]any
-	events      []Event
+	events      []model.Event
 	finalResult any
 }
 
@@ -32,10 +34,10 @@ func NewExecutionContextForTest() *ExecutionContext { return newExecutionContext
 
 // AddEvent appends an event authored by author with the given content items.
 // ID and Timestamp are generated automatically. Safe for concurrent use.
-func (ec *ExecutionContext) AddEvent(author string, content ...ContentItem) {
+func (ec *ExecutionContext) AddEvent(author string, content ...model.ContentItem) {
 	ec.mu.Lock()
 	defer ec.mu.Unlock()
-	ec.events = append(ec.events, Event{
+	ec.events = append(ec.events, model.Event{
 		ID:          generateID(),
 		ExecutionID: ec.ID,
 		Timestamp:   time.Now(),
@@ -45,10 +47,10 @@ func (ec *ExecutionContext) AddEvent(author string, content ...ContentItem) {
 }
 
 // Events returns a defensive copy of the event log. Safe for concurrent use.
-func (ec *ExecutionContext) Events() []Event {
+func (ec *ExecutionContext) Events() []model.Event {
 	ec.mu.Lock()
 	defer ec.mu.Unlock()
-	out := make([]Event, len(ec.events))
+	out := make([]model.Event, len(ec.events))
 	copy(out, ec.events)
 	return out
 }

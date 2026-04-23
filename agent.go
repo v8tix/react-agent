@@ -7,7 +7,7 @@
 // # Quick start
 //
 //	client   := agent.NewLiteLLMClient(openaiClient, model)
-//	executor := myToolExecutor  // implements agent.ToolExecutor
+//	executor := myToolExecutor  // implements model.ToolExecutor
 //	a        := agent.New(client, toolDefs, executor,
 //	                agent.WithInstructions("You are a helpful assistant."),
 //	                agent.WithMaxSteps(10))
@@ -19,34 +19,28 @@
 //
 // Every run produces a full event log in result.Context.Events(). Each event
 // has an Author ("user", "agent", or "tools"), a timestamp, and typed content
-// items (Message, ToolCall, ToolResult).
+// items (model.Message, model.ToolCall, model.ToolResult).
 //
 // # Bringing your own tools
 //
-// Implement ToolExecutor to plug in any dispatch strategy. A typical adapter
-// converts []ToolCall to your tool-runner format, executes concurrently, and
-// returns []ToolResult.
+// Implement model.ToolExecutor to plug in any dispatch strategy. A typical
+// adapter converts []model.ToolCall to your tool-runner format, executes
+// concurrently, and returns []model.ToolResult.
 package agent
 
 import (
 	"context"
 	"fmt"
-)
 
-// ToolExecutor abstracts concurrent tool dispatch for the Agent.
-// Implement this interface to connect any tool-running backend.
-// The default adapter for mcp-toolkit is provided by the consuming project
-// (see tools.NewRegistryExecutor in the companion book project).
-type ToolExecutor interface {
-	Execute(ctx context.Context, calls []ToolCall) ([]ToolResult, error)
-}
+	"github.com/v8tix/react-agent/model"
+)
 
 // Agent is the ReAct orchestrator. It runs a Think → Act → Observe loop until
 // the LLM produces a final answer or maxSteps is exhausted.
 type Agent struct {
 	llmClient    LLMClient
-	toolDefs     []ToolDefinition // definitions sent to the LLM each turn
-	executor     ToolExecutor     // nil is safe when toolDefs is empty
+	toolDefs     []model.ToolDefinition // definitions sent to the LLM each turn
+	executor     model.ToolExecutor     // nil is safe when toolDefs is empty
 	instructions string
 	maxSteps     int
 }
@@ -67,7 +61,7 @@ func WithInstructions(s string) Option {
 // New creates an Agent.
 //   - defs: tool definitions the LLM can call (pass nil or empty for no tools)
 //   - executor: executes tool calls concurrently (pass nil when defs is empty)
-func New(client LLMClient, defs []ToolDefinition, executor ToolExecutor, opts ...Option) *Agent {
+func New(client LLMClient, defs []model.ToolDefinition, executor model.ToolExecutor, opts ...Option) *Agent {
 	a := &Agent{
 		llmClient: client,
 		toolDefs:  defs,
@@ -85,7 +79,7 @@ func New(client LLMClient, defs []ToolDefinition, executor ToolExecutor, opts ..
 // and the complete ExecutionContext containing the event history.
 func (a *Agent) Run(ctx context.Context, userMessage string) (*Result, error) {
 	execCtx := newExecutionContext()
-	execCtx.AddEvent("user", Message{Role: "user", Content: userMessage})
+	execCtx.AddEvent("user", model.Message{Role: "user", Content: userMessage})
 
 	for execCtx.CurrentStep < a.maxSteps {
 		if err := a.Step(ctx, execCtx); err != nil {
@@ -129,15 +123,15 @@ func (a *Agent) Step(ctx context.Context, execCtx *ExecutionContext) error {
 }
 
 // Think calls the LLM with the current execution context and returns its response.
-func (a *Agent) Think(ctx context.Context, execCtx *ExecutionContext) (Response, error) {
+func (a *Agent) Think(ctx context.Context, execCtx *ExecutionContext) (model.Response, error) {
 	return a.llmClient.Generate(ctx, a.prepareRequest(execCtx))
 }
 
 // Act executes all requested tool calls via ToolExecutor and records the results.
 // The agent's tool-call decision is appended as an "agent" event BEFORE execution,
 // then tool results are appended as a "tools" event AFTER execution.
-func (a *Agent) Act(ctx context.Context, execCtx *ExecutionContext, calls []ToolCall) error {
-	callItems := make([]ContentItem, len(calls))
+func (a *Agent) Act(ctx context.Context, execCtx *ExecutionContext, calls []model.ToolCall) error {
+	callItems := make([]model.ContentItem, len(calls))
 	for i, tc := range calls {
 		callItems[i] = tc
 	}
@@ -148,7 +142,7 @@ func (a *Agent) Act(ctx context.Context, execCtx *ExecutionContext, calls []Tool
 		return fmt.Errorf("act execute: %w", err)
 	}
 
-	resultItems := make([]ContentItem, len(results))
+	resultItems := make([]model.ContentItem, len(results))
 	for i, tr := range results {
 		resultItems[i] = tr
 	}
@@ -156,17 +150,17 @@ func (a *Agent) Act(ctx context.Context, execCtx *ExecutionContext, calls []Tool
 	return nil
 }
 
-func (a *Agent) prepareRequest(execCtx *ExecutionContext) Request {
-	return Request{
+func (a *Agent) prepareRequest(execCtx *ExecutionContext) model.Request {
+	return model.Request{
 		Instructions: a.instructions,
 		Events:       execCtx.Events(),
 		Tools:        a.toolDefs,
 	}
 }
 
-func extractAssistantMessage(items []ContentItem) string {
+func extractAssistantMessage(items []model.ContentItem) string {
 	for _, item := range items {
-		if m, ok := item.(Message); ok && m.Role == "assistant" {
+		if m, ok := item.(model.Message); ok && m.Role == "assistant" {
 			return m.Content
 		}
 	}
@@ -177,7 +171,7 @@ func anyToolCalled(execCtx *ExecutionContext) bool {
 	for _, event := range execCtx.Events() {
 		if event.Author == "agent" {
 			for _, item := range event.Content {
-				if _, ok := item.(ToolCall); ok {
+				if _, ok := item.(model.ToolCall); ok {
 					return true
 				}
 			}
