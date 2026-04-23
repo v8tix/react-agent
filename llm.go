@@ -83,59 +83,83 @@ func (c *LiteLLMClient) Generate(ctx context.Context, req model.Request) (model.
 // requests where tool calls appear outside an AssistantMessage.ToolCalls array.
 func buildMessages(instructions string, events []model.Event) []openai.ChatCompletionMessageParamUnion {
 	msgs := make([]openai.ChatCompletionMessageParamUnion, 0, len(events)+1)
-
 	if instructions != "" {
 		msgs = append(msgs, openai.SystemMessage(instructions))
 	}
-
 	for _, event := range events {
-		switch event.Author {
-		case "user":
-			for _, item := range event.Content {
-				if m, ok := item.(model.Message); ok {
-					msgs = append(msgs, openai.UserMessage(m.Content))
-				}
-			}
+		msgs = append(msgs, eventToMessages(event)...)
+	}
+	return msgs
+}
 
-		case "agent":
-			toolCalls := collectToolCalls(event.Content)
-			if len(toolCalls) > 0 {
-				openaiCalls := make([]openai.ChatCompletionMessageToolCallParam, len(toolCalls))
-				for i, tc := range toolCalls {
-					openaiCalls[i] = openai.ChatCompletionMessageToolCallParam{
-						ID:   tc.ID,
-						Type: "function",
-						Function: openai.ChatCompletionMessageToolCallFunctionParam{
-							Name:      tc.Name,
-							Arguments: string(tc.Arguments),
-						},
-					}
-				}
-				msgs = append(msgs, openai.ChatCompletionMessageParamUnion{
-					OfAssistant: &openai.ChatCompletionAssistantMessageParam{
-						ToolCalls: openaiCalls,
-					},
-				})
-			} else {
-				for _, item := range event.Content {
-					if m, ok := item.(model.Message); ok && m.Role == "assistant" {
-						msgs = append(msgs, openai.AssistantMessage(m.Content))
-					}
-				}
-			}
+// eventToMessages dispatches a single event to the appropriate converter.
+func eventToMessages(event model.Event) []openai.ChatCompletionMessageParamUnion {
+	switch event.Author {
+	case "user":
+		return userEventToMessages(event.Content)
+	case "agent":
+		return agentEventToMessages(event.Content)
+	case "tools":
+		return toolsEventToMessages(event.Content)
+	}
+	return nil
+}
 
-		case "tools":
-			for _, item := range event.Content {
-				if tr, ok := item.(model.ToolResult); ok {
-					msgs = append(msgs, openai.ToolMessage(
-						strings.Join(tr.Content, "\n"),
-						tr.ID,
-					))
-				}
-			}
+func userEventToMessages(content []model.ContentItem) []openai.ChatCompletionMessageParamUnion {
+	var msgs []openai.ChatCompletionMessageParamUnion
+	for _, item := range content {
+		if m, ok := item.(model.Message); ok {
+			msgs = append(msgs, openai.UserMessage(m.Content))
 		}
 	}
+	return msgs
+}
 
+// agentEventToMessages produces an assistant message with tool calls when the
+// event contains ToolCall items, or plain assistant text messages otherwise.
+func agentEventToMessages(content []model.ContentItem) []openai.ChatCompletionMessageParamUnion {
+	if toolCalls := collectToolCalls(content); len(toolCalls) > 0 {
+		return []openai.ChatCompletionMessageParamUnion{toAssistantToolCallMessage(toolCalls)}
+	}
+	return agentTextToMessages(content)
+}
+
+func toAssistantToolCallMessage(toolCalls []model.ToolCall) openai.ChatCompletionMessageParamUnion {
+	openaiCalls := make([]openai.ChatCompletionMessageToolCallParam, len(toolCalls))
+	for i, tc := range toolCalls {
+		openaiCalls[i] = openai.ChatCompletionMessageToolCallParam{
+			ID:   tc.ID,
+			Type: "function",
+			Function: openai.ChatCompletionMessageToolCallFunctionParam{
+				Name:      tc.Name,
+				Arguments: string(tc.Arguments),
+			},
+		}
+	}
+	return openai.ChatCompletionMessageParamUnion{
+		OfAssistant: &openai.ChatCompletionAssistantMessageParam{
+			ToolCalls: openaiCalls,
+		},
+	}
+}
+
+func agentTextToMessages(content []model.ContentItem) []openai.ChatCompletionMessageParamUnion {
+	var msgs []openai.ChatCompletionMessageParamUnion
+	for _, item := range content {
+		if m, ok := item.(model.Message); ok && m.Role == "assistant" {
+			msgs = append(msgs, openai.AssistantMessage(m.Content))
+		}
+	}
+	return msgs
+}
+
+func toolsEventToMessages(content []model.ContentItem) []openai.ChatCompletionMessageParamUnion {
+	var msgs []openai.ChatCompletionMessageParamUnion
+	for _, item := range content {
+		if tr, ok := item.(model.ToolResult); ok {
+			msgs = append(msgs, openai.ToolMessage(strings.Join(tr.Content, "\n"), tr.ID))
+		}
+	}
 	return msgs
 }
 
