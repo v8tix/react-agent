@@ -1,5 +1,8 @@
 # 🤖 react-agent
 
+[![Go Reference](https://pkg.go.dev/badge/github.com/v8tix/react-agent.svg)](https://pkg.go.dev/github.com/v8tix/react-agent)
+[![Go Report Card](https://goreportcard.com/badge/github.com/v8tix/react-agent)](https://goreportcard.com/report/github.com/v8tix/react-agent)
+
 **Build AI agents that think before they act.**
 
 Most LLM integrations are one-shot: send a prompt, get an answer. But complex questions require *reasoning* — looking things up, checking results, adjusting the plan. `react-agent` implements the **ReAct pattern** (Reason + Act), a technique where the model alternates between *thinking out loud* and *using tools* until it's confident enough to answer.
