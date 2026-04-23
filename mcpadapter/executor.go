@@ -7,10 +7,10 @@ import (
 	"sort"
 
 	"github.com/reactivex/rxgo/v2"
-	llmhandler "github.com/v8tix/mcp-toolkit/handler"
+	"github.com/v8tix/mcp-toolkit/handler"
 	llmmodel "github.com/v8tix/mcp-toolkit/model"
 	"github.com/v8tix/mcp-toolkit/observable"
-	llmregistry "github.com/v8tix/mcp-toolkit/registry"
+	"github.com/v8tix/mcp-toolkit/registry"
 
 	"github.com/v8tix/react-agent/model"
 )
@@ -29,11 +29,11 @@ type indexedResult struct {
 // Use NewRegistryExecutor to construct one, or call FromRegistry for a
 // one-liner that also returns the tool definitions.
 type RegistryExecutor struct {
-	reg *llmregistry.Registry
+	reg *registry.Registry
 }
 
 // NewRegistryExecutor creates a RegistryExecutor backed by reg.
-func NewRegistryExecutor(reg *llmregistry.Registry) *RegistryExecutor {
+func NewRegistryExecutor(reg *registry.Registry) *RegistryExecutor {
 	return &RegistryExecutor{reg: reg}
 }
 
@@ -59,7 +59,7 @@ func Defs(defs []llmmodel.ToolDefinition) []model.ToolDefinition {
 //
 //	defs, executor := mcpadapter.FromRegistry(reg)
 //	a := agent.New(client, defs, executor, agent.WithInstructions("..."))
-func FromRegistry(reg *llmregistry.Registry) ([]model.ToolDefinition, model.ToolExecutor) {
+func FromRegistry(reg *registry.Registry) ([]model.ToolDefinition, model.ToolExecutor) {
 	return Defs(reg.All()), NewRegistryExecutor(reg)
 }
 
@@ -118,7 +118,7 @@ func (e *RegistryExecutor) callObservable(ctx context.Context, idx int, call mod
 		return errorResult(fmt.Sprintf("tool %q not found in registry", call.Name))
 	}
 
-	exec, ok := tool.(llmhandler.ExecutableTool)
+	exec, ok := tool.(handler.ExecutableTool)
 	if !ok {
 		return errorResult(fmt.Sprintf("tool %q is not executable", call.Name))
 	}
