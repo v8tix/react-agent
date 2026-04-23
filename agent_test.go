@@ -7,7 +7,7 @@ import (
 	"sync"
 	"testing"
 
-	rxgo "github.com/reactivex/rxgo/v2"
+	"github.com/reactivex/rxgo/v2"
 	agent "github.com/v8tix/react-agent"
 	"github.com/v8tix/react-agent/model"
 )
