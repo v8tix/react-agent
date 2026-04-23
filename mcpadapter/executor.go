@@ -163,7 +163,7 @@ func (e *RegistryExecutor) callObservable(ctx context.Context, idx int, call mod
 		})
 	}
 
-	// Map the successful result to an indexedResult, serialising the tool output
+	// Map the successful result to an indexedResult, serializing the tool output
 	// to JSON so the LLM receives a consistent string representation.
 	return source.Map(func(_ context.Context, item any) (any, error) {
 		content, err := json.Marshal(item)
