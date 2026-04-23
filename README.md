@@ -2,6 +2,7 @@
 
 [![Go Reference](https://pkg.go.dev/badge/github.com/v8tix/react-agent.svg)](https://pkg.go.dev/github.com/v8tix/react-agent)
 [![Go Report Card](https://goreportcard.com/badge/github.com/v8tix/react-agent)](https://goreportcard.com/report/github.com/v8tix/react-agent)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 **Build AI agents that think before they act.**
 
