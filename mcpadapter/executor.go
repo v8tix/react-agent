@@ -1,23 +1,3 @@
-// Package mcpadapter bridges github.com/v8tix/mcp-toolkit with react-agent.
-//
-// It provides RegistryExecutor — a concurrent, retry-aware model.ToolExecutor
-// backed by a mcp-toolkit registry.Registry. Tools that implement
-// observable.Tool are executed via ExecuteRx (retry + exponential backoff);
-// plain handler.ExecutableTool implementations fall back to a simple
-// rxgo.Defer wrapper.
-//
-// # Quick start
-//
-//	reg := registry.New(tools...)
-//	defs, executor := mcpadapter.FromRegistry(reg)
-//	a := agent.New(client, defs, executor, agent.WithInstructions("..."))
-//	result, _ := a.Run(ctx, "What is the weather in Paris?")
-//
-// # MCP tools
-//
-//	mcpTools := mcp.NewTools(discovered, session).Build()
-//	reg := registry.New(mcpTools...)
-//	defs, executor := mcpadapter.FromRegistry(reg)
 package mcpadapter
 
 import (

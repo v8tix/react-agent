@@ -1,0 +1,9 @@
+# IDE
+.idea/
+.vscode/
+
+# Go build artifacts
+*.out
+*.test
+/bin/
+/dist/
