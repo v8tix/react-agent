@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"time"
 
-	rxgo "github.com/reactivex/rxgo/v2"
+	"github.com/reactivex/rxgo/v2"
 	"github.com/v8tix/react-agent/model"
 )
 
