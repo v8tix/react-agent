@@ -55,7 +55,7 @@ func (m *mockToolExecutor) Execute(_ context.Context, calls []model.ToolCall) ([
 	return out, nil
 }
 
-// ─── ContentItem ─────────────────────────────────────────────────────────────
+// ─── ContentItem.Type ─────────────────────────────────────────────────────────
 
 func TestContentItem_Type(t *testing.T) {
 	tests := []struct {
@@ -76,237 +76,239 @@ func TestContentItem_Type(t *testing.T) {
 	}
 }
 
-func TestContentItem_JSONRoundTrip(t *testing.T) {
-	t.Run("message", func(t *testing.T) {
-		original := model.Message{Role: "assistant", Content: "Paris"}
-		b, err := json.Marshal(original)
-		if err != nil {
-			t.Fatal(err)
-		}
-		var decoded model.Message
-		if err := json.Unmarshal(b, &decoded); err != nil {
-			t.Fatal(err)
-		}
-		if decoded != original {
-			t.Errorf("want %+v, got %+v", original, decoded)
-		}
-	})
+// ─── ContentItem JSON round-trip ──────────────────────────────────────────────
+// Kept as standalone functions: each type has a different assertion shape
+// (Message uses == comparison, ToolCall needs Arguments comparison, ToolResult
+// needs slice element checks), so they cannot share a uniform assertion loop.
 
-	t.Run("tool_call", func(t *testing.T) {
-		original := model.ToolCall{
-			ID:        "tc-123",
-			Name:      "search",
-			Arguments: json.RawMessage(`{"query":"Paris","limit":5}`),
-		}
-		b, err := json.Marshal(original)
-		if err != nil {
-			t.Fatal(err)
-		}
-		var decoded model.ToolCall
-		if err := json.Unmarshal(b, &decoded); err != nil {
-			t.Fatal(err)
-		}
-		if decoded.ID != original.ID || decoded.Name != original.Name {
-			t.Errorf("want %+v, got %+v", original, decoded)
-		}
-		if string(decoded.Arguments) != string(original.Arguments) {
-			t.Errorf("arguments mismatch: want %s, got %s", original.Arguments, decoded.Arguments)
-		}
-	})
+func TestMessage_JSONRoundTrip(t *testing.T) {
+	original := model.Message{Role: "assistant", Content: "Paris"}
+	b, err := json.Marshal(original)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded model.Message
+	if err := json.Unmarshal(b, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if decoded != original {
+		t.Errorf("want %+v, got %+v", original, decoded)
+	}
+}
 
-	t.Run("tool_result", func(t *testing.T) {
-		original := model.ToolResult{
-			ID:      "tc-123",
-			Name:    "search",
-			Status:  "success",
-			Content: []string{"result line 1", "result line 2"},
-		}
-		b, err := json.Marshal(original)
-		if err != nil {
-			t.Fatal(err)
-		}
-		var decoded model.ToolResult
-		if err := json.Unmarshal(b, &decoded); err != nil {
-			t.Fatal(err)
-		}
-		if decoded.ID != original.ID || decoded.Status != original.Status {
-			t.Errorf("got %+v", decoded)
-		}
-		if len(decoded.Content) != 2 || decoded.Content[1] != "result line 2" {
-			t.Errorf("content mismatch: %v", decoded.Content)
-		}
-	})
+func TestToolCall_JSONRoundTrip(t *testing.T) {
+	original := model.ToolCall{
+		ID:        "tc-123",
+		Name:      "search",
+		Arguments: json.RawMessage(`{"query":"Paris","limit":5}`),
+	}
+	b, err := json.Marshal(original)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded model.ToolCall
+	if err := json.Unmarshal(b, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if decoded.ID != original.ID || decoded.Name != original.Name {
+		t.Errorf("want %+v, got %+v", original, decoded)
+	}
+	if string(decoded.Arguments) != string(original.Arguments) {
+		t.Errorf("arguments mismatch: want %s, got %s", original.Arguments, decoded.Arguments)
+	}
+}
+
+func TestToolResult_JSONRoundTrip(t *testing.T) {
+	original := model.ToolResult{
+		ID:      "tc-123",
+		Name:    "search",
+		Status:  "success",
+		Content: []string{"result line 1", "result line 2"},
+	}
+	b, err := json.Marshal(original)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded model.ToolResult
+	if err := json.Unmarshal(b, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if decoded.ID != original.ID || decoded.Status != original.Status {
+		t.Errorf("got %+v", decoded)
+	}
+	if len(decoded.Content) != 2 || decoded.Content[1] != "result line 2" {
+		t.Errorf("content mismatch: %v", decoded.Content)
+	}
 }
 
 // ─── ExecutionContext ─────────────────────────────────────────────────────────
+// Kept as standalone functions: each tests a distinct, non-overlapping property
+// of ExecutionContext that cannot be expressed as input→output rows.
 
-func TestExecutionContext(t *testing.T) {
-	t.Run("IDNonEmpty", func(t *testing.T) {
-		ec := agent.NewExecutionContextForTest()
-		if ec.ID == "" {
-			t.Fatal("expected non-empty ID")
-		}
-	})
-
-	t.Run("AddEvent_AppendsInOrder", func(t *testing.T) {
-		ec := agent.NewExecutionContextForTest()
-		ec.AddEvent("user", model.Message{Role: "user", Content: "Q"})
-		ec.AddEvent("agent", model.Message{Role: "assistant", Content: "A"})
-
-		events := ec.Events()
-		if len(events) != 2 {
-			t.Fatalf("want 2 events, got %d", len(events))
-		}
-		if events[0].Author != "user" || events[1].Author != "agent" {
-			t.Fatalf("unexpected authors: %s, %s", events[0].Author, events[1].Author)
-		}
-	})
-
-	t.Run("Events_DefensiveCopy", func(t *testing.T) {
-		ec := agent.NewExecutionContextForTest()
-		ec.AddEvent("user", model.Message{Role: "user", Content: "hi"})
-
-		e1 := ec.Events()
-		e1[0].Author = "mutated"
-		e2 := ec.Events()
-
-		if e2[0].Author != "user" {
-			t.Fatal("mutation of returned slice affected internal state")
-		}
-	})
-
-	t.Run("EventIDs_Unique", func(t *testing.T) {
-		ec := agent.NewExecutionContextForTest()
-		ec.AddEvent("user", model.Message{Role: "user", Content: "a"})
-		ec.AddEvent("agent", model.Message{Role: "assistant", Content: "b"})
-
-		events := ec.Events()
-		if events[0].ID == events[1].ID {
-			t.Fatal("event IDs should be unique")
-		}
-	})
-
-	t.Run("ConcurrentAddEvent", func(t *testing.T) {
-		ec := agent.NewExecutionContextForTest()
-		const n = 20
-		var wg sync.WaitGroup
-		wg.Add(n)
-		for i := 0; i < n; i++ {
-			go func() {
-				defer wg.Done()
-				ec.AddEvent("agent", model.Message{Role: "assistant", Content: "concurrent"})
-			}()
-		}
-		wg.Wait()
-
-		if len(ec.Events()) != n {
-			t.Fatalf("want %d events, got %d", n, len(ec.Events()))
-		}
-	})
+func TestExecutionContext_IDNonEmpty(t *testing.T) {
+	ec := agent.NewExecutionContextForTest()
+	if ec.ID == "" {
+		t.Fatal("expected non-empty ID")
+	}
 }
 
-func TestExecutionContext_IncrementStep(t *testing.T) {
-	t.Run("sequential", func(t *testing.T) {
-		ec := agent.NewExecutionContextForTest()
-		if ec.CurrentStep != 0 {
-			t.Fatalf("want initial step=0, got %d", ec.CurrentStep)
-		}
-		ec.IncrementStep()
-		if ec.CurrentStep != 1 {
-			t.Fatalf("want step=1 after first increment, got %d", ec.CurrentStep)
-		}
-		ec.IncrementStep()
-		if ec.CurrentStep != 2 {
-			t.Fatalf("want step=2 after second increment, got %d", ec.CurrentStep)
-		}
-	})
+func TestExecutionContext_AddEvent_AppendsInOrder(t *testing.T) {
+	ec := agent.NewExecutionContextForTest()
+	ec.AddEvent("user", model.Message{Role: "user", Content: "Q"})
+	ec.AddEvent("agent", model.Message{Role: "assistant", Content: "A"})
 
-	t.Run("concurrent", func(t *testing.T) {
-		ec := agent.NewExecutionContextForTest()
-		const n = 50
-		var wg sync.WaitGroup
-		wg.Add(n)
-		for i := 0; i < n; i++ {
-			go func() {
-				defer wg.Done()
-				ec.IncrementStep()
-			}()
-		}
-		wg.Wait()
-		if ec.CurrentStep != n {
-			t.Errorf("want CurrentStep=%d after %d concurrent increments, got %d", n, n, ec.CurrentStep)
-		}
-	})
+	events := ec.Events()
+	if len(events) != 2 {
+		t.Fatalf("want 2 events, got %d", len(events))
+	}
+	if events[0].Author != "user" || events[1].Author != "agent" {
+		t.Fatalf("unexpected authors: %s, %s", events[0].Author, events[1].Author)
+	}
 }
 
-// ─── Agent.Run — simple output cases ─────────────────────────────────────────
+func TestExecutionContext_Events_DefensiveCopy(t *testing.T) {
+	ec := agent.NewExecutionContextForTest()
+	ec.AddEvent("user", model.Message{Role: "user", Content: "hi"})
 
-func TestAgent_Run(t *testing.T) {
-	t.Run("NoTools_ReturnsAnswer", func(t *testing.T) {
-		mock := &mockLLMClient{
-			responses: []model.Response{
-				{Content: []model.ContentItem{model.Message{Role: "assistant", Content: "Paris"}}},
-			},
-		}
-		a := agent.New(mock, nil, nil, agent.WithInstructions("You are helpful"))
-		result, err := a.Run(context.Background(), "Capital of France?")
-		if err != nil {
-			t.Fatal(err)
-		}
-		if result.Output != "Paris" {
-			t.Fatalf("want Paris, got %s", result.Output)
-		}
-		if result.ToolCalled {
-			t.Fatal("no tools should have been called")
-		}
-		if result.Context == nil {
-			t.Fatal("expected non-nil context")
-		}
-	})
+	e1 := ec.Events()
+	e1[0].Author = "mutated"
+	e2 := ec.Events()
 
-	t.Run("ContextContainsUserMessage", func(t *testing.T) {
-		mock := &mockLLMClient{
-			responses: []model.Response{
-				{Content: []model.ContentItem{model.Message{Role: "assistant", Content: "ok"}}},
-			},
-		}
-		a := agent.New(mock, nil, nil)
-		result, err := a.Run(context.Background(), "test question")
-		if err != nil {
-			t.Fatal(err)
-		}
-		events := result.Context.Events()
-		if len(events) == 0 {
-			t.Fatal("expected events")
-		}
-		msg, ok := events[0].Content[0].(model.Message)
-		if !ok {
-			t.Fatal("first content item should be a Message")
-		}
-		if msg.Role != "user" || msg.Content != "test question" {
-			t.Fatalf("unexpected message: %+v", msg)
-		}
-	})
+	if e2[0].Author != "user" {
+		t.Fatal("mutation of returned slice affected internal state")
+	}
+}
 
-	t.Run("MultiStep_FinalAnswerOnStep2", func(t *testing.T) {
-		mock := &mockLLMClient{
-			responses: []model.Response{
-				{Content: nil},
-				{Content: []model.ContentItem{model.Message{Role: "assistant", Content: "42"}}},
-			},
-		}
-		a := agent.New(mock, nil, nil, agent.WithMaxSteps(5))
-		result, err := a.Run(context.Background(), "What is 6*7?")
-		if err != nil {
-			t.Fatal(err)
-		}
-		if result.Output != "42" {
-			t.Fatalf("want 42, got %s", result.Output)
-		}
-		if result.Context.CurrentStep != 1 {
-			t.Fatalf("want CurrentStep=1, got %d", result.Context.CurrentStep)
-		}
-	})
+func TestExecutionContext_EventIDs_Unique(t *testing.T) {
+	ec := agent.NewExecutionContextForTest()
+	ec.AddEvent("user", model.Message{Role: "user", Content: "a"})
+	ec.AddEvent("agent", model.Message{Role: "assistant", Content: "b"})
+
+	events := ec.Events()
+	if events[0].ID == events[1].ID {
+		t.Fatal("event IDs should be unique")
+	}
+}
+
+func TestExecutionContext_ConcurrentAddEvent(t *testing.T) {
+	ec := agent.NewExecutionContextForTest()
+	const n = 20
+	var wg sync.WaitGroup
+	wg.Add(n)
+	for i := 0; i < n; i++ {
+		go func() {
+			defer wg.Done()
+			ec.AddEvent("agent", model.Message{Role: "assistant", Content: "concurrent"})
+		}()
+	}
+	wg.Wait()
+	if len(ec.Events()) != n {
+		t.Fatalf("want %d events, got %d", n, len(ec.Events()))
+	}
+}
+
+// ─── ExecutionContext.IncrementStep ───────────────────────────────────────────
+
+func TestExecutionContext_IncrementStep_Sequential(t *testing.T) {
+	ec := agent.NewExecutionContextForTest()
+	if ec.CurrentStep != 0 {
+		t.Fatalf("want initial step=0, got %d", ec.CurrentStep)
+	}
+	ec.IncrementStep()
+	if ec.CurrentStep != 1 {
+		t.Fatalf("want step=1 after first increment, got %d", ec.CurrentStep)
+	}
+	ec.IncrementStep()
+	if ec.CurrentStep != 2 {
+		t.Fatalf("want step=2 after second increment, got %d", ec.CurrentStep)
+	}
+}
+
+func TestExecutionContext_IncrementStep_Concurrent(t *testing.T) {
+	ec := agent.NewExecutionContextForTest()
+	const n = 50
+	var wg sync.WaitGroup
+	wg.Add(n)
+	for i := 0; i < n; i++ {
+		go func() {
+			defer wg.Done()
+			ec.IncrementStep()
+		}()
+	}
+	wg.Wait()
+	if ec.CurrentStep != n {
+		t.Errorf("want CurrentStep=%d after %d concurrent increments, got %d", n, n, ec.CurrentStep)
+	}
+}
+
+// ─── Agent.Run — output and step count ───────────────────────────────────────
+// Kept as standalone functions: each verifies a different aspect of Run()
+// (output value, event structure, step counter) that cannot share assertion code.
+
+func TestAgent_Run_NoTools_ReturnsAnswer(t *testing.T) {
+	mock := &mockLLMClient{
+		responses: []model.Response{
+			{Content: []model.ContentItem{model.Message{Role: "assistant", Content: "Paris"}}},
+		},
+	}
+	a := agent.New(mock, nil, nil, agent.WithInstructions("You are helpful"))
+	result, err := a.Run(context.Background(), "Capital of France?")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Output != "Paris" {
+		t.Fatalf("want Paris, got %s", result.Output)
+	}
+	if result.ToolCalled {
+		t.Fatal("no tools should have been called")
+	}
+	if result.Context == nil {
+		t.Fatal("expected non-nil context")
+	}
+}
+
+func TestAgent_Run_ContextContainsUserMessage(t *testing.T) {
+	mock := &mockLLMClient{
+		responses: []model.Response{
+			{Content: []model.ContentItem{model.Message{Role: "assistant", Content: "ok"}}},
+		},
+	}
+	a := agent.New(mock, nil, nil)
+	result, err := a.Run(context.Background(), "test question")
+	if err != nil {
+		t.Fatal(err)
+	}
+	events := result.Context.Events()
+	if len(events) == 0 {
+		t.Fatal("expected events")
+	}
+	msg, ok := events[0].Content[0].(model.Message)
+	if !ok {
+		t.Fatal("first content item should be a Message")
+	}
+	if msg.Role != "user" || msg.Content != "test question" {
+		t.Fatalf("unexpected message: %+v", msg)
+	}
+}
+
+func TestAgent_Run_MultiStep_FinalAnswerOnStep2(t *testing.T) {
+	mock := &mockLLMClient{
+		responses: []model.Response{
+			{Content: nil},
+			{Content: []model.ContentItem{model.Message{Role: "assistant", Content: "42"}}},
+		},
+	}
+	a := agent.New(mock, nil, nil, agent.WithMaxSteps(5))
+	result, err := a.Run(context.Background(), "What is 6*7?")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Output != "42" {
+		t.Fatalf("want 42, got %s", result.Output)
+	}
+	if result.Context.CurrentStep != 1 {
+		t.Fatalf("want CurrentStep=1, got %d", result.Context.CurrentStep)
+	}
 }
 
 // ─── Agent.Run — error propagation ───────────────────────────────────────────
@@ -323,12 +325,12 @@ func TestAgent_Run_ErrorPropagation(t *testing.T) {
 		wantErr  error
 	}{
 		{
-			name:    "LLMError",
+			name:    "LLM error",
 			mock:    &mockLLMClient{err: sentinelLLMErr},
 			wantErr: sentinelLLMErr,
 		},
 		{
-			name: "ExecutorError",
+			name: "executor error",
 			mock: &mockLLMClient{responses: []model.Response{
 				{Content: []model.ContentItem{
 					model.ToolCall{ID: "tc1", Name: "search", Arguments: json.RawMessage(`{}`)},
@@ -367,7 +369,7 @@ func TestAgent_Run_MaxSteps(t *testing.T) {
 	}{
 		{
 			// maxSteps=0: loop guard fires before first LLM call.
-			name:     "zero_immediate_error",
+			name:     "zero — immediate error before any LLM call",
 			maxSteps: 0,
 			responses: []model.Response{
 				{Content: []model.ContentItem{model.Message{Role: "assistant", Content: "answer"}}},
@@ -376,14 +378,14 @@ func TestAgent_Run_MaxSteps(t *testing.T) {
 		},
 		{
 			// maxSteps=2: LLM keeps returning nil content, loop exhausts.
-			name:      "exhausted_with_nil_responses",
+			name:      "exhausted with nil responses",
 			maxSteps:  2,
 			responses: []model.Response{{Content: nil}},
 		},
 		{
 			// maxSteps=1: step 0 produces a tool call, IncrementStep → step=1 == maxSteps,
 			// loop exits before the follow-up Think.
-			name:     "tool_call_then_limit",
+			name:     "tool call then limit",
 			maxSteps: 1,
 			responses: []model.Response{
 				{Content: []model.ContentItem{
@@ -411,11 +413,12 @@ func TestAgent_Run_MaxSteps(t *testing.T) {
 	}
 }
 
-// ─── Full ReAct cycle — standalone (too complex for a table) ─────────────────
+// ─── Full ReAct cycle — standalone ───────────────────────────────────────────
 
 // TestAgent_Run_FullReActCycle is the core integration test:
 // think → tool call → tool result → think → final answer.
-// This is the only test that exercises Act() and validates ToolCalled=true.
+// Kept standalone because it validates multiple inter-dependent properties
+// (ToolCalled, event structure, executor invocation) not expressible as rows.
 func TestAgent_Run_FullReActCycle(t *testing.T) {
 	toolCallStep := model.Response{Content: []model.ContentItem{
 		model.ToolCall{ID: "tc1", Name: "search", Arguments: json.RawMessage(`{"q":"Paris"}`)},
@@ -447,7 +450,6 @@ func TestAgent_Run_FullReActCycle(t *testing.T) {
 		t.Errorf("want 1 search call, got %+v", calls)
 	}
 
-	// Verify event structure: user → agent(tool call) → tools(result)
 	events := result.Context.Events()
 	if len(events) < 3 {
 		t.Fatalf("want ≥3 events (user/agent/tools), got %d", len(events))
@@ -502,8 +504,6 @@ func TestAgent_Run_MultipleToolCallsInOneStep(t *testing.T) {
 // ─── Concurrent safety ────────────────────────────────────────────────────────
 
 func TestAgent_Run_Concurrent_NoSharedState(t *testing.T) {
-	// N goroutines run concurrently on the same Agent; each must get its own
-	// correct output without cross-contamination.
 	const n = 20
 	a := agent.New(
 		&mockLLMClient{responses: []model.Response{
@@ -527,7 +527,6 @@ func TestAgent_Run_Concurrent_NoSharedState(t *testing.T) {
 			errs <- nil
 		}()
 	}
-
 	for i := 0; i < n; i++ {
 		if err := <-errs; err != nil {
 			t.Errorf("concurrent run failed: %v", err)
