@@ -143,7 +143,7 @@ func (e *RegistryExecutor) callObservable(ctx context.Context, idx int, call mod
 		return errorResult(fmt.Sprintf("tool %q is not executable", call.Name))
 	}
 
-	rawArgs := json.RawMessage(call.Arguments)
+	rawArgs := call.Arguments
 
 	// observable.Tool gets the retry-aware reactive path; plain ExecutableTool
 	// gets a simple rxgo.Defer wrapper (one attempt, no backoff).

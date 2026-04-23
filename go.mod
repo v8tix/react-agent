@@ -1,6 +1,6 @@
 module github.com/v8tix/react-agent
 
-go 1.26.1
+go 1.26
 
 require (
 	github.com/openai/openai-go v1.12.0
