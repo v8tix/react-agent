@@ -159,12 +159,16 @@ graph TB
     subgraph "Your Code"
         U(["👤 Caller"])
         EX["🔧 ToolExecutor\nimpl"]
+        B["🪝 BeforeToolCallback"]
+        AFT["🪝 AfterToolCallback"]
+        HITL["✅ External approver / UI"]
     end
 
     subgraph "react-agent"
         AG["🤖 Agent\norchestrator"]
         EC["📋 ExecutionContext\nmessage history"]
         LP["🔁 ReAct Loop\nstep controller"]
+        IR["⏸️ InteractionRequest /\nSuspendedRun"]
     end
 
     subgraph "External"
@@ -173,14 +177,23 @@ graph TB
     end
 
     U -->|"New(...).WithX().Run()"| AG
+    U -->|"Resume(...)"| AG
     AG --> EC
     AG --> LP
     LP -->|"Generate(messages)"| LLM
     LLM -->|"ToolCall or Answer"| LP
+    LP -->|"BeforeTool(call)"| B
+    B -->|"override / continue"| LP
+    B -.->|"Suspend(req)"| IR
+    IR -.->|"emit + return"| U
+    U -.->|"approve / deny"| HITL
+    HITL -.->|"InteractionResponse"| AG
     LP -->|"Execute(calls)"| EX
     EX -->|"dispatch"| TOOLS
     TOOLS -->|"results"| EX
     EX -->|"ToolResult[]"| LP
+    LP -->|"AfterTool(result)"| AFT
+    AFT -->|"replace / keep"| LP
     LP -->|"*Result"| AG
     AG -->|"*Result, Observable, error"| U
 ```
@@ -258,10 +271,20 @@ timeline
     RunStart    : 🚀 RunStartEvent
     Step 1      : 📍 StepStartEvent
                 : 🧠 LLMCallEvent (Think)
+                : 🪝 CallbackEvent (before_tool start)
+                : 🪝 CallbackEvent (before_tool finish)
                 : 🔧 ToolExecEvent (Act)
+                : 🪝 CallbackEvent (after_tool start)
+                : 🪝 CallbackEvent (after_tool finish)
                 : 📍 StepEndEvent
     Step 2      : 📍 StepStartEvent
                 : 🧠 LLMCallEvent (Think)
+                : 🪝 CallbackEvent (before_tool start)
+                : 🪝 CallbackEvent (before_tool finish)
+                : ⏸️ InteractionRequestedEvent
+                : ▶️ InteractionResumedEvent
+                : 🪝 CallbackEvent (before_tool start)
+                : 🪝 CallbackEvent (before_tool finish)
                 : 🔧 ToolExecEvent (Act)
                 : 📍 StepEndEvent
     Final step  : 📍 StepStartEvent
@@ -274,10 +297,13 @@ timeline
 
 | Event            | Payload highlights           | When emitted                           |
 |------------------|------------------------------|----------------------------------------|
-| `RunStartEvent`  | `RunID`, `Question`          | Before the loop begins                 |
+| `RunStartEvent`  | `RunID`, `UserMessage`       | Before the loop begins                 |
 | `StepStartEvent` | `Step` number                | At the start of each Think→Act cycle   |
 | `LLMCallEvent`   | `Latency`, `Err`             | After every `Generate()` call          |
+| `CallbackEvent`  | `Phase`, `Stage`, `ToolName`, `Overrode`, `Err` | Before and after each callback invocation |
 | `ToolExecEvent`  | `ToolNames`, `Latency`, `Err`| After every `Execute()` batch          |
+| `InteractionRequestedEvent` | `Request` | When a callback suspends execution for external input |
+| `InteractionResumedEvent` | `Response` | When `Resume(...)` continues a suspended run |
 | `StepEndEvent`   | `Step` number                | At the end of each Think→Act cycle     |
 | `RunEndEvent`    | `*Result`, `Err`             | On completion or error                 |
 
@@ -293,11 +319,15 @@ if err != nil {
 for item := range events.Observe() {
     switch e := item.V.(type) {
     case agent.RunStartEvent:
-        slog.Info("🚀 agent started", "run_id", e.RunID, "question", e.Question)
+        slog.Info("🚀 agent started", "run_id", e.RunID, "question", e.UserMessage)
     case agent.LLMCallEvent:
         slog.Info("🧠 llm call", "latency_ms", e.Latency.Milliseconds())
+    case agent.CallbackEvent:
+        slog.Info("🪝 callback", "phase", e.Phase, "stage", e.Stage, "tool", e.ToolName, "overrode", e.Overrode)
     case agent.ToolExecEvent:
         slog.Info("🔧 tool exec", "tools", e.ToolNames, "latency_ms", e.Latency.Milliseconds())
+    case agent.InteractionRequestedEvent:
+        slog.Info("⏸️ waiting for input", "request_id", e.Request.ID, "tool", e.Request.ToolName)
     case agent.RunEndEvent:
         slog.Info("🏁 run finished", "err", e.Err)
     }
@@ -310,29 +340,82 @@ fmt.Println(result.Output)
 
 ---
 
+## ⏸️ Suspend / Resume for Human-in-the-Loop
+
+Callbacks can pause the agent and hand control back to your app when a tool call needs confirmation. Your app can then collect input from a CLI, web UI, queue consumer, or API, and continue the same run with `Resume(...)`.
+
+```go
+type approvalCallback struct{}
+
+func (approvalCallback) BeforeTool(_ context.Context, execCtx *agent.ExecutionContext, call model.ToolCall) (*model.ToolResult, error) {
+    requestID := "approve-" + call.ID
+
+    // On resume, the callback can read the previously supplied answer.
+    if resp, ok := execCtx.InteractionResponse(requestID); ok {
+        if resp.Approved != nil && *resp.Approved {
+            return nil, nil // continue to the executor
+        }
+        return &model.ToolResult{
+            ID:      call.ID,
+            Name:    call.Name,
+            Status:  "error",
+            Content: []string{"tool call denied"},
+        }, nil
+    }
+
+    // First pass: suspend and let the outer app decide.
+    return nil, agent.Suspend(agent.InteractionRequest{
+        ID:         requestID,
+        Kind:       "approval",
+        Prompt:     "Approve dangerous tool?",
+        ToolCallID: call.ID,
+        ToolName:   call.Name,
+    })
+}
+
+a := agent.New(client, defs, executor).
+    WithInstructions("Ask for approval before destructive tools.").
+    WithBeforeToolCallbacks(approvalCallback{})
+
+result, _, err := a.Run(ctx, "Delete danger.txt")
+if err != nil {
+    var suspended *agent.InteractionRequestedError
+    if errors.As(err, &suspended) {
+        approved := true // replace with your CLI / web / API decision
+
+        result, _, err = a.Resume(ctx, suspended.Suspended, agent.InteractionResponse{
+            RequestID: suspended.Suspended.Interaction.ID,
+            Approved:  &approved,
+        })
+    }
+}
+
+if err != nil {
+    log.Fatal(err)
+}
+
+fmt.Println(result.Output)
+```
+
+> 💡 `Suspend(...)` does not lose the run state. The callback is re-entered on `Resume(...)`, reads the stored `InteractionResponse`, and either allows the tool to execute or returns an override result instead.
+
+---
+
 ## 🕹️ Manual Step Control
 
-`Step` is exported so you can drive the loop yourself — useful for streaming UI updates, checkpointing long runs, or **human-in-the-loop** interrupts:
+`Step` is still available when you want to drive the loop yourself — useful for streaming UI updates, custom checkpoints, or research/debug flows where you want to inspect each step manually:
 
 ```go
 execCtx := agent.NewExecutionContextForTest()
-execCtx.AddEvent("user", agent.Message{Role: "user", Content: "Plan a 3-day trip to Kyoto"})
+execCtx.AddEvent("user", model.Message{Role: "user", Content: "Plan a 3-day trip to Kyoto"})
 
 for execCtx.CurrentStep < 15 {
     if err := a.Step(ctx, execCtx); err != nil {
         break
     }
 
-    // 🔍 Inspect what just happened before the next step
     latest := execCtx.Events()[len(execCtx.Events())-1]
-    fmt.Printf("Step %d: %s said something\n", execCtx.CurrentStep, latest.Author)
-
-    // 🛑 Human-in-the-loop: pause and ask for approval
-    if needsApproval(latest) {
-        if !getUserApproval() {
-            break
-        }
-    }
+    fmt.Printf("step %d: %s emitted %d item(s)\n", execCtx.CurrentStep, latest.Author, len(latest.Content))
 
     execCtx.IncrementStep()
 }
@@ -370,11 +453,14 @@ for _, event := range result.Context.Events() {
 classDiagram
     class Agent {
         +Run(ctx, question) Result, Observable, error
+        +Resume(ctx, suspended, response) Result, Observable, error
         +Step(ctx, execCtx) error
         +Think(ctx, execCtx) error
         +Act(ctx, execCtx) error
-        -WithInstructions(string) Agent
-        -WithMaxSteps(int) Agent
+        +WithInstructions(string) Agent
+        +WithMaxSteps(int) Agent
+        +WithBeforeToolCallbacks(...BeforeToolCallback) Agent
+        +WithAfterToolCallbacks(...AfterToolCallback) Agent
     }
 
     class LLMClient {
@@ -387,11 +473,42 @@ classDiagram
         +Execute(ctx, calls) ToolResults, error
     }
 
+    class BeforeToolCallback {
+        <<interface>>
+        +BeforeTool(ctx, execCtx, call) ToolResult, error
+    }
+
+    class AfterToolCallback {
+        <<interface>>
+        +AfterTool(ctx, execCtx, result) ToolResult, error
+    }
+
     class ExecutionContext {
         +Events() []Event
         +AddEvent(author, items)
         +CurrentStep int
         +IncrementStep()
+        +PendingInteraction() InteractionRequest, bool
+        +InteractionResponse(requestID) InteractionResponse, bool
+    }
+
+    class SuspendedRun {
+        +Context ExecutionContext
+        +Interaction InteractionRequest
+    }
+
+    class InteractionRequest {
+        +ID string
+        +Kind string
+        +Prompt string
+        +ToolCallID string
+        +ToolName string
+    }
+
+    class InteractionResponse {
+        +RequestID string
+        +Approved bool
+        +Value string
     }
 
     class AgentEvent {
@@ -399,15 +516,23 @@ classDiagram
         RunStartEvent
         StepStartEvent
         LLMCallEvent
+        CallbackEvent
         ToolExecEvent
+        InteractionRequestedEvent
+        InteractionResumedEvent
         StepEndEvent
         RunEndEvent
     }
 
     Agent --> LLMClient : uses
     Agent --> ToolExecutor : uses
+    Agent --> BeforeToolCallback : uses
+    Agent --> AfterToolCallback : uses
     Agent --> ExecutionContext : owns
+    Agent --> SuspendedRun : resumes
     Agent ..> AgentEvent : emits via Observable
+    InteractionRequestedEvent --> InteractionRequest : carries
+    InteractionResumedEvent --> InteractionResponse : carries
 ```
 
 | Type | Role |
