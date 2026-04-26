@@ -14,18 +14,22 @@ import (
 // agent produces a terminal response.
 // All public methods are safe for concurrent use.
 type ExecutionContext struct {
-	mu          sync.Mutex
-	id          string
-	currentStep int
-	state       map[string]any
-	events      []model.Event
-	finalResult any
+	mu                  sync.Mutex
+	id                  string
+	currentStep         int
+	state               map[string]any
+	events              []model.Event
+	finalResult         any
+	pendingInteraction  *InteractionRequest
+	interactionResponse map[string]InteractionResponse
+	pendingAct          *actState
 }
 
 func newExecutionContext() *ExecutionContext {
 	return &ExecutionContext{
-		id:    generateID(),
-		state: make(map[string]any),
+		id:                  generateID(),
+		state:               make(map[string]any),
+		interactionResponse: make(map[string]InteractionResponse),
 	}
 }
 
@@ -120,6 +124,65 @@ func (ec *ExecutionContext) setFinalResult(v any) {
 	ec.mu.Lock()
 	defer ec.mu.Unlock()
 	ec.finalResult = v
+}
+
+func (ec *ExecutionContext) setPendingInteraction(req InteractionRequest) {
+	ec.mu.Lock()
+	defer ec.mu.Unlock()
+	reqCopy := req
+	ec.pendingInteraction = &reqCopy
+}
+
+// PendingInteraction returns the active external interaction request, if any.
+func (ec *ExecutionContext) PendingInteraction() (*InteractionRequest, bool) {
+	ec.mu.Lock()
+	defer ec.mu.Unlock()
+	if ec.pendingInteraction == nil {
+		return nil, false
+	}
+	req := *ec.pendingInteraction
+	return &req, true
+}
+
+func (ec *ExecutionContext) clearPendingInteraction() {
+	ec.mu.Lock()
+	defer ec.mu.Unlock()
+	ec.pendingInteraction = nil
+}
+
+func (ec *ExecutionContext) storeInteractionResponse(resp InteractionResponse) {
+	ec.mu.Lock()
+	defer ec.mu.Unlock()
+	ec.interactionResponse[resp.RequestID] = resp
+}
+
+// InteractionResponse returns a previously supplied external response, if present.
+func (ec *ExecutionContext) InteractionResponse(requestID string) (InteractionResponse, bool) {
+	ec.mu.Lock()
+	defer ec.mu.Unlock()
+	resp, ok := ec.interactionResponse[requestID]
+	return resp, ok
+}
+
+func (ec *ExecutionContext) setPendingAct(state *actState) {
+	ec.mu.Lock()
+	defer ec.mu.Unlock()
+	ec.pendingAct = state
+}
+
+func (ec *ExecutionContext) pendingActState() (*actState, bool) {
+	ec.mu.Lock()
+	defer ec.mu.Unlock()
+	if ec.pendingAct == nil {
+		return nil, false
+	}
+	return ec.pendingAct, true
+}
+
+func (ec *ExecutionContext) clearPendingAct() {
+	ec.mu.Lock()
+	defer ec.mu.Unlock()
+	ec.pendingAct = nil
 }
 
 func generateID() string {

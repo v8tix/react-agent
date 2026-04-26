@@ -68,12 +68,60 @@ type ToolExecEvent struct {
 	Err       error
 }
 
-func (RunStartEvent) isAgentEvent()  {}
-func (RunEndEvent) isAgentEvent()    {}
-func (StepStartEvent) isAgentEvent() {}
-func (StepEndEvent) isAgentEvent()   {}
-func (LLMCallEvent) isAgentEvent()   {}
-func (ToolExecEvent) isAgentEvent()  {}
+// CallbackPhase identifies which callback stage emitted the event.
+type CallbackPhase string
+
+const (
+	CallbackPhaseBeforeTool CallbackPhase = "before_tool"
+	CallbackPhaseAfterTool  CallbackPhase = "after_tool"
+)
+
+// CallbackStage identifies whether the event was emitted before invoking the
+// callback or after it returned.
+type CallbackStage string
+
+const (
+	CallbackStageStart  CallbackStage = "start"
+	CallbackStageFinish CallbackStage = "finish"
+)
+
+// CallbackEvent is emitted before and after each callback invocation.
+type CallbackEvent struct {
+	RunID      string
+	Step       int
+	Phase      CallbackPhase
+	Stage      CallbackStage
+	Callback   string
+	ToolCallID string
+	ToolName   string
+	Overrode   bool
+	Latency    time.Duration
+	Err        error
+}
+
+// InteractionRequestedEvent is emitted when the agent suspends to await external input.
+type InteractionRequestedEvent struct {
+	RunID   string
+	Step    int
+	Request InteractionRequest
+}
+
+// InteractionResumedEvent is emitted when a suspended interaction receives a response.
+type InteractionResumedEvent struct {
+	RunID    string
+	Step     int
+	Response InteractionResponse
+}
+
+func (RunStartEvent) isAgentEvent()             {}
+func (RunEndEvent) isAgentEvent()               {}
+func (StepStartEvent) isAgentEvent()            {}
+func (StepEndEvent) isAgentEvent()              {}
+func (LLMCallEvent) isAgentEvent()              {}
+func (ToolExecEvent) isAgentEvent()             {}
+func (CallbackEvent) isAgentEvent()             {}
+func (InteractionRequestedEvent) isAgentEvent() {}
+func (InteractionResumedEvent) isAgentEvent()   {}
 
 func toolNames(calls []model.ToolCall) []string {
 	names := make([]string, len(calls))
