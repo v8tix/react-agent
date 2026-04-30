@@ -5,9 +5,9 @@ import (
 	"encoding/json"
 	"testing"
 
-	"github.com/v8tix/mcp-toolkit/handler"
-	llmmodel "github.com/v8tix/mcp-toolkit/model"
-	"github.com/v8tix/mcp-toolkit/registry"
+	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
+	"github.com/v8tix/mcp-toolkit/v2/handler"
+	"github.com/v8tix/mcp-toolkit/v2/registry"
 
 	"github.com/v8tix/react-agent/mcpadapter"
 	"github.com/v8tix/react-agent/model"
@@ -56,7 +56,7 @@ func TestDefs_ConvertsToolDefinitions(t *testing.T) {
 }
 
 func TestDefs_EmptyRegistry(t *testing.T) {
-	defs := mcpadapter.Defs([]llmmodel.ToolDefinition{})
+	defs := mcpadapter.Defs([]*sdkmcp.Tool{})
 	if len(defs) != 0 {
 		t.Fatalf("want empty, got %d", len(defs))
 	}
