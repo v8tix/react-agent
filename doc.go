@@ -75,8 +75,67 @@
 //	    return results, nil
 //	}
 //
-// For MCP-based tools (github.com/v8tix/mcp-toolkit), use the ready-made
+// For MCP-based tools (github.com/v8tix/mcp-toolkit/v2), use the ready-made
 // adapter in the [mcpadapter] sub-package.
+//
+// # Stateful sessions and approvals
+//
+// Use [SessionRunner] when a conversation must persist across multiple
+// user-facing turns. It replays prior [model.Event] values from a
+// [SessionManager], runs the agent, and saves the updated state after each call.
+// If a callback suspends the run, [SessionRunner.Run] returns [StatusPending]
+// plus a pending interaction payload that your app can surface in a UI or API
+// before resuming:
+//
+//	sessions := agent.NewInMemorySessionManager()
+//	runner := agent.NewSessionRunner(
+//	    agent.New(client, defs, executor).
+//	        WithBeforeToolCallbacks(agent.NewConfirmationCallback(agent.StaticApprovalPolicy{
+//	            "delete_file": {MessageTemplate: "Approve file deletion?"},
+//	        })),
+//	    sessions,
+//	    8,
+//	)
+//
+//	first, _ := runner.Run(ctx, "chat-1", "user-7", "My name is Alice")
+//	next, _ := runner.Run(ctx, "chat-1", "user-7", "What's my name?")
+//	_, _ = first, next
+//
+// Approval callbacks use [Suspend] under the hood and can be resumed with
+// [Agent.Resume] or [SessionRunner.Resume]. The built-in [ConfirmationCallback]
+// also redacts sensitive tool arguments from the interaction payload.
+//
+// # Request mutation and context memory
+//
+// [MutatingLLMClient] lets you rewrite a request immediately before it is sent
+// to the underlying [LLMClient]. This is the extension point for prompt
+// hygiene, context-window management, and memory injection.
+//
+// Common building blocks:
+//
+//   - [ContextOptimizer] applies one or more [OptimizationStrategy] values once
+//     a [TokenCounter] threshold is exceeded.
+//   - [SlidingWindowStrategy] preserves the latest user turn and a recent tail of
+//     events.
+//   - [CompactionStrategy] replaces bulky tool payloads with short sanitized
+//     summaries.
+//   - [SummarizationStrategy] moves older history into a generated summary in
+//     the instructions.
+//   - [WithMutatorLogger] adds structured logs around any [RequestMutator].
+//
+// # Long-term task memory
+//
+// [TaskMemoryManager] stores solved tasks in a pluggable [VectorStore] so future
+// requests can retrieve similar work. Pair it with [MemoryInjector] to inject
+// the most relevant prior records into the prompt before each LLM call:
+//
+//	memories := agent.NewTaskMemoryManager(embedder, agent.NewInMemoryVectorStore(), agent.SimpleDuplicateChecker{})
+//	clientWithMemory := agent.NewMutatingLLMClient(
+//	    client,
+//	    agent.NewMemoryInjector(memories, 3),
+//	)
+//
+//	_, _, _ = memories, clientWithMemory, agent.New(clientWithMemory, defs, executor)
 //
 // # Manual step control
 //
