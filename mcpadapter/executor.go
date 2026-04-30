@@ -6,11 +6,11 @@ import (
 	"fmt"
 	"sort"
 
+	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/reactivex/rxgo/v2"
-	"github.com/v8tix/mcp-toolkit/handler"
-	llmmodel "github.com/v8tix/mcp-toolkit/model"
-	"github.com/v8tix/mcp-toolkit/observable"
-	"github.com/v8tix/mcp-toolkit/registry"
+	"github.com/v8tix/mcp-toolkit/v2/handler"
+	"github.com/v8tix/mcp-toolkit/v2/observable"
+	"github.com/v8tix/mcp-toolkit/v2/registry"
 
 	"github.com/v8tix/react-agent/model"
 )
@@ -37,18 +37,20 @@ func NewRegistryExecutor(reg *registry.Registry) *RegistryExecutor {
 	return &RegistryExecutor{reg: reg}
 }
 
-// Defs converts a slice of mcp-toolkit ToolDefinitions to model.ToolDefinitions.
+// Defs converts a slice of *sdkmcp.Tool to model.ToolDefinitions.
 // Pass the result as the defs argument to agent.New().
 //
 //	defs := mcpadapter.Defs(reg.All())
-func Defs(defs []llmmodel.ToolDefinition) []model.ToolDefinition {
+func Defs(defs []*sdkmcp.Tool) []model.ToolDefinition {
 	result := make([]model.ToolDefinition, len(defs))
 	for i, d := range defs {
+		params, _ := d.InputSchema.(map[string]any)
+		addlProps, hasAddlProps := params["additionalProperties"]
 		result[i] = model.ToolDefinition{
-			Name:        d.Function.Name,
-			Description: d.Function.Description,
-			Parameters:  d.Function.Parameters.ToMap(),
-			Strict:      d.Function.Strict,
+			Name:        d.Name,
+			Description: d.Description,
+			Parameters:  params,
+			Strict:      hasAddlProps && addlProps == false,
 		}
 	}
 	return result
