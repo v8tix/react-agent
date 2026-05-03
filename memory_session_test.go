@@ -78,6 +78,41 @@ func TestConfirmationCallback_RedactsPayloadAndResumes(t *testing.T) {
 	}
 }
 
+func TestSessionRunner_ResumesPersistedApprovalState(t *testing.T) {
+	args, _ := json.Marshal(map[string]any{"filename": "/tmp/secret.txt"})
+	llm := &sequenceLLM{responses: []model.Response{
+		{Content: []model.ContentItem{model.ToolCall{ID: "tc-1", Name: "delete_file", Arguments: args}}},
+		assistantResponse("Deleted temp.txt."),
+	}}
+	exec := &sessionStubToolExecutor{results: []model.ToolResult{{ID: "tc-1", Name: "delete_file", Status: "success", Content: []string{"Deleted temp.txt"}}}}
+	persister := newInMemorySessionPersister()
+	runner := NewSessionRunner(
+		New(llm, []model.ToolDefinition{{Name: "delete_file"}}, exec).
+			WithBeforeToolCallbacks(NewConfirmationCallback(StaticApprovalPolicy{
+				"delete_file": {MessageTemplate: "Approve?"},
+			})).
+			WithMaxSteps(4),
+		NewPersistedSessionManager(persister),
+		4,
+	)
+
+	pending, err := runner.Run(context.Background(), "s1", "u1", "delete temp.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pending.Status != StatusPending {
+		t.Fatalf("status = %q, want pending", pending.Status)
+	}
+	approved := true
+	resumed, err := runner.Resume(context.Background(), "s1", "u1", InteractionResponse{RequestID: pending.PendingInteraction.ID, Approved: &approved})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resumed.Output != "Deleted temp.txt." {
+		t.Fatalf("unexpected resumed output: %q", resumed.Output)
+	}
+}
+
 type scriptedLLM func(context.Context, model.Request) (model.Response, error)
 
 func (s scriptedLLM) Generate(ctx context.Context, req model.Request) (model.Response, error) {

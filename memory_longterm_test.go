@@ -71,6 +71,29 @@ func TestMemoryInjector_SanitizesInjectedMemoriesAndQuery(t *testing.T) {
 	}
 }
 
+func TestSelectiveMemoryWriter_SkipsLowValueMemories(t *testing.T) {
+	manager := NewTaskMemoryManager(
+		staticEmbedder{
+			"Task: trivial greeting": {1, 0},
+		},
+		NewInMemoryVectorStore(),
+		SimpleDuplicateChecker{},
+	).WithWritePolicy(NewThresholdMemoryWritePolicy(0.6))
+
+	_, saved, err := manager.Save(context.Background(), TaskMemory{
+		TaskSummary: "trivial greeting",
+		Approach:    "answered directly",
+		FinalAnswer: "hello",
+		IsCorrect:   true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if saved {
+		t.Fatal("expected low-value memory to be skipped")
+	}
+}
+
 type staticEmbedder map[string][]float64
 
 func (s staticEmbedder) Embed(_ context.Context, texts []string) ([][]float64, error) {

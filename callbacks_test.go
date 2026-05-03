@@ -631,6 +631,42 @@ func TestAgent_Resume_ApprovedContinuesExecution(t *testing.T) {
 	}
 }
 
+func TestAgent_Resume_ObservableReplaysAcrossSubscriptions(t *testing.T) {
+	t.Parallel()
+
+	call := model.ToolCall{ID: "tc1", Name: "delete_file", Arguments: json.RawMessage(`{"path":"danger.txt"}`)}
+	mock := &mockLLMClient{responses: []model.Response{
+		{Content: []model.ContentItem{call}},
+		{Content: []model.ContentItem{model.Message{Role: "assistant", Content: "done"}}},
+	}}
+	executor := &mockToolExecutor{
+		results: []model.ToolResult{{ID: call.ID, Name: call.Name, Status: "success", Content: []string{"deleted"}}},
+	}
+	a := agent.New(mock, []model.ToolDefinition{{Name: "delete_file"}}, executor).
+		WithBeforeToolCallbacks(interactiveApprovalBeforeCallback{deniedMessage: "blocked"})
+
+	_, _, err := a.Run(context.Background(), "delete it")
+	var suspendedErr *agent.InteractionRequestedError
+	if !errors.As(err, &suspendedErr) {
+		t.Fatalf("want InteractionRequestedError, got %v", err)
+	}
+
+	approved := true
+	_, events, err := a.Resume(context.Background(), suspendedErr.Suspended, agent.InteractionResponse{
+		RequestID: suspendedErr.Suspended.Interaction.ID,
+		Approved:  &approved,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	first := collectInteractionResumedEvents(t, events)
+	second := collectInteractionResumedEvents(t, events)
+	if len(first) != 1 || len(second) != 1 {
+		t.Fatalf("resumed replay counts = %d and %d, want 1 each", len(first), len(second))
+	}
+}
+
 func TestAgent_Resume_RejectedReturnsOverrideWithoutExecuting(t *testing.T) {
 	t.Parallel()
 

@@ -8,7 +8,8 @@ import (
 	"github.com/v8tix/react-agent/model"
 )
 
-// ApprovalRule defines how a tool approval request should be presented and denied.
+// ApprovalRule defines how a tool approval request should be shown to a human
+// and what message should come back if the action is denied.
 type ApprovalRule struct {
 	MessageTemplate string
 	DeniedMessage   string
@@ -28,7 +29,8 @@ func (p StaticApprovalPolicy) RuleForTool(name string) (ApprovalRule, bool) {
 	return rule, ok
 }
 
-// ConfirmationCallback suspends execution until selected tools are explicitly approved.
+// ConfirmationCallback pauses execution before selected tools so an external
+// UI, API, or human can approve or deny the action.
 type ConfirmationCallback struct {
 	policy ApprovalPolicy
 	logger *slog.Logger
@@ -45,7 +47,8 @@ func (c ConfirmationCallback) WithLogger(logger *slog.Logger) ConfirmationCallba
 	return c
 }
 
-// BeforeTool requests approval for matching tools and redacts sensitive arguments in the payload.
+// BeforeTool requests approval for matching tools and redacts sensitive
+// arguments before they are exposed in the interaction payload.
 func (c ConfirmationCallback) BeforeTool(_ context.Context, execCtx *ExecutionContext, call model.ToolCall) (*model.ToolResult, error) {
 	if c.policy == nil {
 		return nil, nil

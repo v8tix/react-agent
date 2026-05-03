@@ -23,6 +23,11 @@ type RequestMutator interface {
 	Mutate(ctx context.Context, req *model.Request) error
 }
 
+// StablePrefixDetector identifies cache-friendly prefixes in evolving requests.
+type StablePrefixDetector interface {
+	Detect(model.Request) string
+}
+
 // OptimizationStrategy rewrites a request to reduce context size or noise.
 type OptimizationStrategy interface {
 	Optimize(ctx context.Context, req *model.Request) error
@@ -220,7 +225,8 @@ func (CompactionStrategy) Optimize(_ context.Context, req *model.Request) error 
 }
 
 // ContextOptimizer applies a list of optimization strategies once a token
-// threshold has been exceeded.
+// threshold has been exceeded, letting callers compress or summarize history
+// before the next model call.
 type ContextOptimizer struct {
 	counter    TokenCounter
 	threshold  int
@@ -228,7 +234,8 @@ type ContextOptimizer struct {
 	logger     *slog.Logger
 }
 
-// NewContextOptimizer builds a request mutator that conditionally applies optimization strategies.
+// NewContextOptimizer builds a request mutator that conditionally applies
+// optimization strategies when a request grows past the configured budget.
 func NewContextOptimizer(counter TokenCounter, threshold int, strategies ...OptimizationStrategy) *ContextOptimizer {
 	return &ContextOptimizer{counter: counter, threshold: threshold, strategies: slices.Clone(strategies)}
 }
