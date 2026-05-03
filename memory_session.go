@@ -32,15 +32,39 @@ type SessionManager interface {
 	GetOrCreate(sessionID, userID string) (*Session, error)
 }
 
+// SessionPersister stores raw session snapshots for durable runners.
+type SessionPersister interface {
+	SaveSession(context.Context, Session) error
+	LoadSession(context.Context, string) (Session, error)
+}
+
 // InMemorySessionManager is a thread-safe in-process [SessionManager].
 type InMemorySessionManager struct {
 	mu       sync.RWMutex
 	sessions map[string]*Session
 }
 
+type persistedSessionManager struct {
+	persister SessionPersister
+}
+
+type inMemorySessionPersister struct {
+	mu       sync.RWMutex
+	sessions map[string]Session
+}
+
 // NewInMemorySessionManager creates an empty in-memory session store.
 func NewInMemorySessionManager() *InMemorySessionManager {
 	return &InMemorySessionManager{sessions: map[string]*Session{}}
+}
+
+// NewPersistedSessionManager adapts a SessionPersister to the SessionManager interface.
+func NewPersistedSessionManager(persister SessionPersister) SessionManager {
+	return &persistedSessionManager{persister: persister}
+}
+
+func newInMemorySessionPersister() *inMemorySessionPersister {
+	return &inMemorySessionPersister{sessions: map[string]Session{}}
 }
 
 // Create inserts a new session for the given session and user identifiers.
@@ -100,6 +124,84 @@ func (m *InMemorySessionManager) GetOrCreate(sessionID, userID string) (*Session
 	return m.Create(sessionID, userID)
 }
 
+func (m *persistedSessionManager) Create(sessionID, userID string) (*Session, error) {
+	if userID == "" {
+		return nil, fmt.Errorf("userID is required")
+	}
+	existing, err := m.Get(sessionID)
+	if err != nil {
+		return nil, err
+	}
+	if existing != nil {
+		return nil, fmt.Errorf("session %s already exists", sessionID)
+	}
+	now := time.Now()
+	session := &Session{SessionID: sessionID, UserID: userID, Events: []model.Event{}, State: map[string]any{}, CreatedAt: now, UpdatedAt: now}
+	if err := m.Save(session); err != nil {
+		return nil, err
+	}
+	return cloneSession(session), nil
+}
+
+func (m *persistedSessionManager) Get(sessionID string) (*Session, error) {
+	if m.persister == nil {
+		return nil, nil
+	}
+	session, err := m.persister.LoadSession(context.Background(), sessionID)
+	if err != nil {
+		return nil, err
+	}
+	if session.SessionID == "" {
+		return nil, nil
+	}
+	return cloneSession(&session), nil
+}
+
+func (m *persistedSessionManager) Save(session *Session) error {
+	if session == nil {
+		return fmt.Errorf("cannot save nil session")
+	}
+	if m.persister == nil {
+		return fmt.Errorf("session persister is required")
+	}
+	session.UpdatedAt = time.Now()
+	return m.persister.SaveSession(context.Background(), *cloneSession(session))
+}
+
+func (m *persistedSessionManager) GetOrCreate(sessionID, userID string) (*Session, error) {
+	if userID == "" {
+		return nil, fmt.Errorf("userID is required")
+	}
+	session, err := m.Get(sessionID)
+	if err != nil {
+		return nil, err
+	}
+	if session != nil {
+		if session.UserID != userID {
+			return nil, fmt.Errorf("session %s belongs to a different user", sessionID)
+		}
+		return session, nil
+	}
+	return m.Create(sessionID, userID)
+}
+
+func (p *inMemorySessionPersister) SaveSession(_ context.Context, session Session) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.sessions[session.SessionID] = *cloneSession(&session)
+	return nil
+}
+
+func (p *inMemorySessionPersister) LoadSession(_ context.Context, sessionID string) (Session, error) {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	session, ok := p.sessions[sessionID]
+	if !ok {
+		return Session{}, nil
+	}
+	return *cloneSession(&session), nil
+}
+
 // RunStatus reports whether a session run finished or is waiting for input.
 type RunStatus string
 
@@ -120,7 +222,8 @@ type RunResult struct {
 }
 
 // SessionRunner replays prior events from a session, executes the agent loop,
-// and persists the updated state after each run or resume.
+// and persists the updated state after each run or resume so conversations can
+// continue across separate calls.
 type SessionRunner struct {
 	agent    *Agent
 	sessions SessionManager
@@ -128,7 +231,8 @@ type SessionRunner struct {
 	logger   *slog.Logger
 }
 
-// NewSessionRunner builds a session-aware wrapper around [Agent].
+// NewSessionRunner builds a session-aware wrapper around [Agent] for chat-style
+// or workflow-style conversations that span multiple turns.
 func NewSessionRunner(agent *Agent, sessions SessionManager, maxSteps int) *SessionRunner {
 	if maxSteps <= 0 {
 		maxSteps = 10

@@ -3,7 +3,7 @@ module github.com/v8tix/react-agent
 go 1.26
 
 require (
-	github.com/modelcontextprotocol/go-sdk v1.5.0
+	github.com/modelcontextprotocol/go-sdk v1.6.0
 	github.com/openai/openai-go v1.12.0
 	github.com/reactivex/rxgo/v2 v2.5.0
 	github.com/tiktoken-go/tokenizer v0.7.0

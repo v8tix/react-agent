@@ -10,7 +10,11 @@ import (
 // ErrInteractionRequested signals that the agent suspended awaiting external input.
 var ErrInteractionRequested = errors.New("agent: interaction requested")
 
-// InteractionRequest describes a prompt that must be answered from outside the agent.
+// InteractionRequest describes a question that must be answered from outside
+// the agent before the run can continue.
+//
+// Common examples are "approve this tool call?" or "which account should be
+// used for this action?"
 type InteractionRequest struct {
 	ID         string
 	Kind       string
@@ -20,7 +24,8 @@ type InteractionRequest struct {
 	Payload    map[string]any
 }
 
-// InteractionResponse carries the external answer to a pending interaction request.
+// InteractionResponse carries the external answer to a pending interaction
+// request.
 type InteractionResponse struct {
 	RequestID string
 	Approved  *bool
@@ -28,7 +33,8 @@ type InteractionResponse struct {
 	Metadata  map[string]any
 }
 
-// SuspendedRun contains the paused execution state and the pending interaction.
+// SuspendedRun contains the paused execution state plus the interaction that
+// must be answered before the run can resume.
 type SuspendedRun struct {
 	Context     *ExecutionContext
 	Interaction InteractionRequest
@@ -54,6 +60,9 @@ func (e *interactionSignal) Error() string {
 }
 
 // Suspend requests external interaction from inside a callback.
+//
+// Returning Suspend(req) from a callback is what turns a normal run into an
+// approval loop or any other human-in-the-loop step.
 func Suspend(req InteractionRequest) error {
 	return &interactionSignal{Request: req}
 }
