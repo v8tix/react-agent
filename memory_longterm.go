@@ -114,10 +114,14 @@ func (s *InMemoryVectorStore) Search(_ context.Context, query []float64, topK in
 }
 
 // TaskMemoryManager saves and retrieves semantically indexed task memories.
+//
+// Think of it as "we solved a similar problem before; bring that pattern back
+// when a new request looks close enough."
 type TaskMemoryManager struct {
 	embedder         Embedder
 	store            VectorStore
 	duplicateChecker DuplicateChecker
+	writePolicy      MemoryWritePolicy
 	logger           *slog.Logger
 }
 
@@ -132,10 +136,27 @@ func (m *TaskMemoryManager) WithLogger(logger *slog.Logger) *TaskMemoryManager {
 	return m
 }
 
+// WithWritePolicy attaches an optional policy that can skip low-value memories.
+func (m *TaskMemoryManager) WithWritePolicy(policy MemoryWritePolicy) *TaskMemoryManager {
+	m.writePolicy = policy
+	return m
+}
+
 // Save embeds, de-duplicates, and persists a task memory.
 func (m *TaskMemoryManager) Save(ctx context.Context, memory TaskMemory) (string, bool, error) {
 	logInfo(m.logger, "memory_save_start", "task_summary", sanitizeInlineForContext(memory.TaskSummary, 120))
 	memory = sanitizeTaskMemory(memory)
+	if m.writePolicy != nil {
+		decision, err := m.writePolicy.Decide(ctx, memory)
+		if err != nil {
+			logError(m.logger, "memory_save_end", "saved", false, "err", err)
+			return "", false, err
+		}
+		if !decision.ShouldStore {
+			logInfo(m.logger, "memory_save_end", "saved", false, "reason", decision.Reason, "score", decision.Score)
+			return "", false, nil
+		}
+	}
 	vector, err := m.embedOne(ctx, memory.EmbeddingText())
 	if err != nil {
 		logError(m.logger, "memory_save_end", "saved", false, "err", err)
@@ -205,7 +226,8 @@ type MemorySearcher interface {
 	Search(ctx context.Context, query string, topK int) ([]TaskMemory, error)
 }
 
-// MemoryInjector adds retrieved long-term memories to the prompt instructions.
+// MemoryInjector adds retrieved long-term memories to the prompt instructions
+// so the model can reuse prior approaches instead of starting from scratch.
 type MemoryInjector struct {
 	searcher MemorySearcher
 	topK     int

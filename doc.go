@@ -19,6 +19,15 @@
 //	         WithInstructions("You are a precise research assistant.").
 //	         WithMaxSteps(15)
 //
+// When a workflow should expose only a subset of tools at a given step, add
+// [Agent.WithDynamicToolsCallback]:
+//
+//	a := agent.New(client, toolDefs, executor).
+//	         WithDynamicToolsCallback(func(execCtx *agent.ExecutionContext) []model.ToolDefinition {
+//	             _ = execCtx // inspect current events or state here
+//	             return toolDefs[:1]
+//	         })
+//
 // # Running an agent
 //
 // [Agent.Run] executes the full loop for a single user question. It returns a
@@ -48,6 +57,16 @@
 //
 // Calling Observe() again replays all events from the beginning — safe for
 // multiple independent subscribers (loggers, metrics, tracing).
+//
+// If you want live logging while the run is still executing, attach a sink with
+// [Agent.WithLiveEventSink]:
+//
+//	a := agent.New(client, toolDefs, executor).
+//	         WithLiveEventSink(func(event agent.AgentEvent) {
+//	             if e, ok := event.(agent.LLMCallEvent); ok {
+//	                 slog.Info("live llm call", "step", e.Step, "latency_ms", e.Latency.Milliseconds())
+//	             }
+//	         })
 //
 // # Execution history
 //
@@ -85,7 +104,8 @@
 // [SessionManager], runs the agent, and saves the updated state after each call.
 // If a callback suspends the run, [SessionRunner.Run] returns [StatusPending]
 // plus a pending interaction payload that your app can surface in a UI or API
-// before resuming:
+// before resuming. Use [NewPersistedSessionManager] with a [SessionPersister]
+// when that state must survive process boundaries:
 //
 //	sessions := agent.NewInMemorySessionManager()
 //	runner := agent.NewSessionRunner(
@@ -104,6 +124,55 @@
 // Approval callbacks use [Suspend] under the hood and can be resumed with
 // [Agent.Resume] or [SessionRunner.Resume]. The built-in [ConfirmationCallback]
 // also redacts sensitive tool arguments from the interaction payload.
+// Read and write [Session.State] when later turns depend on facts captured
+// earlier — it works well as shared scratch space for multi-step workflows.
+//
+// # Planning and reflection policies
+//
+// For tasks that benefit from explicit planning, pair [NewPlanningExecutor]
+// with [PlanningToolDefinition]. Add [NewPlanningReflectionTracker] plus
+// [NewPlanningReflectionPolicy] when you want the agent to revise its task list
+// before finalizing. Use [WithPlanningReflectionStagnationThreshold] to turn on
+// a stricter loop where repeated planning-only churn triggers an explicit
+// reflection step before more planning is allowed. When final answers must be
+// grounded in gathered facts, add [NewVerificationGate] after an
+// [EvidenceCollector] has started recording support for the answer.
+//
+// # Workflow-owned control
+//
+// Some applications need more than generic tool use. They need a bounded
+// workflow where the model can still reason, but the application controls the
+// critical phases. A friendly way to think about this is:
+//
+//	plan -> deterministic step -> fallback if needed -> gather evidence -> grounded answer
+//
+// `react-agent` keeps those workflow rules out of the core runtime. Instead it
+// exposes small seams so the application can own the policy:
+//
+//   - [Agent.WithDynamicToolsCallback] can hide tools that should not be visible
+//     in the current phase.
+//   - [BeforeToolCallback] can block illegal tool choices, trigger circuit
+//     breakers, or queue corrective user messages.
+//   - [AfterToolCallback] can record state transitions after success or failure.
+//   - [FinalAnswerCallback] can reject an answer that is not grounded in the
+//     facts already gathered by the workflow.
+//   - [QueueDeferredUserMessage] lets callbacks steer the next turn without
+//     breaking the event ordering guarantees of the loop.
+//
+// A typical workflow-controlled setup looks like:
+//
+//	phaseTracker := newMyWorkflowTracker()
+//	a := agent.New(client, defs, executor).
+//	         WithDynamicToolsCallback(func(execCtx *agent.ExecutionContext) []model.ToolDefinition {
+//	             return phaseTracker.AllowedTools(defs)
+//	         }).
+//	         WithBeforeToolCallbacks(phaseTracker).
+//	         WithAfterToolCallbacks(phaseTracker).
+//	         WithFinalAnswerCallbacks(myWorkflowGate{tracker: phaseTracker})
+//
+// In that pattern, the library still owns the ReAct loop, history, events, and
+// suspension/resume flow, while the application owns the business-specific
+// workflow phases.
 //
 // # Request mutation and context memory
 //
@@ -122,6 +191,10 @@
 //   - [SummarizationStrategy] moves older history into a generated summary in
 //     the instructions.
 //   - [WithMutatorLogger] adds structured logs around any [RequestMutator].
+//   - [StablePrefixDetector] is a small seam for apps that want to identify the
+//     reusable prefix of a request for caching-friendly workflows. This is most
+//     useful when your provider supports prompt caching and the request has a
+//     large stable setup section.
 //
 // # Long-term task memory
 //
@@ -136,6 +209,55 @@
 //	)
 //
 //	_, _, _ = memories, clientWithMemory, agent.New(clientWithMemory, defs, executor)
+//
+// Attach [WithWritePolicy] to [TaskMemoryManager] when only higher-value task
+// completions should be stored as long-term memory. The built-in
+// [ThresholdMemoryWritePolicy] is a good default when you want to skip trivial
+// or low-detail task outcomes instead of saving every successful run.
+//
+// Retrieval-heavy applications can keep retrieval logic outside the agent while
+// still sharing common contracts. [HybridRetriever] expresses a query-to-candidate
+// retrieval step, [Reranker] refines those candidates, and [ChunkContextEnricher]
+// can add document-aware context before indexing.
+//
+// # Retrieval terminology
+//
+// A few retrieval words show up often when building agent systems:
+//
+//   - A "chunk" is a small piece of source text that can be stored and retrieved
+//     later. For example, one paragraph from a refund policy.
+//   - "Chunk context enrichment" means attaching source-level context so the
+//     chunk still makes sense by itself. For example, turning "refunds accepted
+//     within 30 days" into "Refund Policy — refunds accepted within 30 days".
+//   - "Lexical retrieval" means matching exact words or phrases.
+//   - "Semantic retrieval" means matching by meaning, even when wording changes.
+//   - "Hybrid retrieval" means combining more than one retrieval signal into a
+//     single shortlist.
+//   - "Reranking" means taking that rough shortlist and reordering it with a
+//     slower, more precise second pass.
+//   - "Dynamic tools" means showing the model only the tools that make sense in
+//     the current phase of the workflow.
+//   - "Grounding" means requiring the final answer to rely on authoritative
+//     facts already captured in the run.
+//   - A "circuit breaker" means stopping a repeated bad action instead of
+//     letting the loop retry the same blocked path forever.
+//
+// `react-agent` does not force one retrieval stack. Instead it exposes small
+// contracts so applications can plug in their own lexical search, vector search,
+// reranking model, or indexing pipeline without changing the core agent loop.
+//
+// # Approval and compression terminology
+//
+// Two other concepts appear frequently in production agents:
+//
+//   - An "approval loop" pauses before a risky action, asks an external system
+//     or human to decide, and then resumes or denies the action. In this
+//     package that path runs through [ConfirmationCallback], [Suspend],
+//     [InteractionRequest], [InteractionResponse], and [Agent.Resume].
+//   - "Compression" or "context optimization" means shrinking noisy history
+//     before the next model call so the useful parts stay visible. Common tools
+//     here are [ContextOptimizer], [CompactionStrategy], and
+//     [SummarizationStrategy].
 //
 // # Manual step control
 //

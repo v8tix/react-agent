@@ -18,3 +18,10 @@ type BeforeToolCallback interface {
 type AfterToolCallback interface {
 	AfterTool(ctx context.Context, execCtx *ExecutionContext, result model.ToolResult) (*model.ToolResult, error)
 }
+
+// FinalAnswerCallback can reject a proposed final answer before the agent ends
+// the run. Returning an error keeps the loop alive and lets the caller inject a
+// corrective message back into the conversation.
+type FinalAnswerCallback interface {
+	BeforeFinalAnswer(ctx context.Context, execCtx *ExecutionContext, answer string) error
+}

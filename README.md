@@ -210,6 +210,154 @@ graph TB
 
 ---
 
+## 🧾 Terminology Guide
+
+These terms show up across the library because they describe the **shape of agent work**, not one specific app.
+
+| Term | Plain-English meaning | Friendly example | Related API |
+|------|------------------------|------------------|-------------|
+| **Chunk** | a small piece of source text you can retrieve later | one paragraph from a refund policy | your app's indexing layer |
+| **Chunk context enrichment** | adding source details so a chunk still makes sense by itself | `"Refund Policy — refunds accepted within 30 days"` instead of just `"refunds accepted within 30 days"` | `ChunkContextEnricher` |
+| **Lexical retrieval** | finding results by exact words or phrases | query `"refund policy"` matches a chunk containing those exact words | app-defined retriever |
+| **Semantic retrieval** | finding results by meaning, even if the wording changes | query `"money back rules"` still finds the refund chunk | embedder + vector store |
+| **Hybrid retrieval** | combining more than one retrieval signal into one shortlist | exact words + meaning together | `HybridRetriever` |
+| **Reranking** | taking a rough shortlist and reordering it with a stronger second pass | top 20 search hits become the best 3 | `Reranker` |
+| **Approval loop** | pausing before a risky action so a human can approve it | ask before `delete_file` or `charge_card` | `ConfirmationCallback`, `Suspend`, `Resume` |
+| **Callback** | a hook that can inspect, block, or rewrite work around tool execution | reject a tool call or shorten a huge tool result | `BeforeToolCallback`, `AfterToolCallback` |
+| **Dynamic tools** | showing the model only the tools that make sense right now | planning turn sees `create_tasks`, recovery turn sees `research_conversion` | `WithDynamicToolsCallback` |
+| **Workflow-owned control** | keeping business rules in your app while the library keeps running the loop | the workflow decides "plan -> convert -> fallback -> verify", not the generic runtime | callbacks + session/state in your app |
+| **Deterministic phase** | a step where the workflow should decide what happens next, not the model | after an unsupported conversion, force fallback instead of asking the model to choose | dynamic tools + callbacks |
+| **Grounding** | making the final answer explicitly rely on authoritative facts already gathered | reject an answer that ignores the recovered meter value | `FinalAnswerCallback` |
+| **Circuit breaker** | stopping a repeated bad action instead of looping forever | block the same illegal tool twice, then fail loudly | `BeforeToolCallback` |
+| **Compression / context optimization** | shrinking noisy history before the next LLM call | turn a 2-page HTML result into 3 useful lines | `ContextOptimizer`, `CompactionStrategy`, `SummarizationStrategy` |
+| **Task memory** | storing solved-task patterns so the agent can reuse them later | "we solved a similar outage last week" | `TaskMemoryManager`, `MemoryInjector` |
+| **Selective write** | storing only high-value memories instead of every completed task | skip saving `"what is 2+2"` but keep `"how we debugged the checkout outage"` | `MemoryWritePolicy`, `ThresholdMemoryWritePolicy` |
+
+> 🙂 Friendly rule: **retrieve wide, then narrow; pause before risky actions; shrink context before it becomes noise.**
+
+### Sequence: chunk context enrichment
+
+Use this when a raw chunk is too small to stand on its own.
+
+```mermaid
+sequenceDiagram
+    participant App as 👤 App
+    participant E as 🧩 ChunkContextEnricher
+    participant I as 🗂️ Index
+
+    App->>E: EnrichChunk("refunds accepted within 30 days", metadata)
+    E-->>App: "Refund Policy — refunds accepted within 30 days"
+    App->>I: store enriched chunk
+```
+
+Without enrichment, the chunk may be technically correct but hard to understand once it is separated from the full document.
+
+### Sequence: hybrid retrieval
+
+Use this when exact wording matters **and** meaning matters.
+
+```mermaid
+sequenceDiagram
+    participant App as 👤 App
+    participant H as 🔀 HybridRetriever
+    participant L as 🔎 Lexical search
+    participant S as 🧠 Semantic search
+
+    App->>H: Retrieve("money back rules", 10)
+    H->>L: exact-word lookup
+    L-->>H: candidates with phrase overlap
+    H->>S: meaning-based lookup
+    S-->>H: candidates with semantic similarity
+    H-->>App: merged RetrievalCandidate list
+```
+
+Think of hybrid retrieval as **two flashlights pointed at the same shelf**: one catches exact labels, the other catches similar ideas.
+
+### Sequence: reranking
+
+Use this when the first retrieval pass is broad but not precise enough.
+
+```mermaid
+sequenceDiagram
+    participant App as 👤 App
+    participant R as 🎯 Reranker
+
+    App->>R: Rerank(query, roughTopK, 3)
+    R-->>App: better-ordered top 3
+```
+
+The common rhythm is: **retrieve 20 quickly, rerank to 3 carefully**.
+
+### Sequence: approval loop
+
+Use this when a tool can do something expensive, destructive, or externally visible.
+
+```mermaid
+sequenceDiagram
+    participant App as 👤 App
+    participant A as 🤖 Agent
+    participant C as ✅ ConfirmationCallback
+    participant UI as 🙋 Human approver
+    participant X as 🔧 ToolExecutor
+
+    App->>A: "Delete danger.txt"
+    A->>C: BeforeTool(delete_file)
+    C-->>A: Suspend(InteractionRequest)
+    A-->>UI: approval needed
+    UI-->>A: Resume(approved=true)
+    A->>X: Execute(delete_file)
+    X-->>A: ToolResult(success)
+    A-->>App: final answer
+```
+
+If the answer is "no", the callback can return a synthetic error result instead of letting the tool run.
+
+### Sequence: compression and context optimization
+
+Use this when tool output or long conversations start crowding out the useful parts.
+
+```mermaid
+sequenceDiagram
+    participant App as 👤 App
+    participant M as 🪄 MutatingLLMClient
+    participant O as 🪶 ContextOptimizer
+    participant C as 📦 Compaction / summary strategy
+    participant L as 🧠 LLM
+
+    App->>M: Generate(request)
+    M->>O: Mutate(request)
+    O->>C: shrink bulky history
+    C-->>O: trimmed request
+    O-->>M: optimized request
+    M->>L: Generate(optimized request)
+```
+
+This is less about deleting information and more about **keeping the signal while dropping the clutter**.
+
+> 💡 `react-agent` intentionally keeps retrieval, reranking, approvals, and context control as small contracts. You can plug in your own search stack, vector DB, safety policy, or compression strategy without changing the core ReAct loop.
+
+### Sequence: workflow-owned control
+
+Use this when the loop is still useful, but some steps must follow a strict app-defined path.
+
+```mermaid
+flowchart TD
+    U["👤 User asks for a bounded workflow"] --> P["🗂️ Planning phase\nshow only create_tasks"]
+    P --> DC["📏 Direct conversion phase\ncontroller emits convert_units"]
+    DC --> DECIDE{{"unsupported\nconversion?"}}
+    DECIDE -->|"yes"| FC["🛟 Fallback phase\ncontroller emits research_conversion"]
+    DECIDE -->|"no"| E["🔎 Evidence phase\nshow / emit gather_fact"]
+    FC --> E
+    E --> G["🧾 Final answer gate\ncheck grounding"]
+    G -->|"grounded"| A["✅ Final answer"]
+    G -->|"not grounded"| R["↩️ corrective user message"]
+    R --> A
+```
+
+Friendly mental model: the library still runs the **same loop**, but your workflow can narrow the lane. The model keeps its reasoning ability, while your app decides which parts are too important to leave open-ended.
+
+---
+
 ## 🔧 Implementing ToolExecutor
 
 The only interface you **must** implement:
@@ -278,6 +426,8 @@ flowchart TD
     START -->|"Agent automation"| AUTO["🔧 Flow 2 + 📚 Flow 7"]
     START -->|"Human-supervised agent"| SAFE["⏸️ Flow 4 + 🧵 Flow 5"]
     START -->|"Need observability"| OBS["📡 Flow 3 + 📊 Flow 8"]
+    START -->|"Durable production agent"| DURABLE["🔄 Flow 9 + 🧵 Flow 5"]
+    START -->|"Bounded workflow with rules"| CONTROL["🧭 Flow 10 + 🔧 Flow 2"]
 ```
 
 | Flow | Best for | Complexity | Core pieces |
@@ -290,6 +440,8 @@ flowchart TD
 | **Flow 6 — 🪶 Context Optimization** | long conversations | ⭐⭐⭐⭐ | `MutatingLLMClient`, strategies |
 | **Flow 7 — 📚 Long-Term Memory** | learning from past tasks | ⭐⭐⭐⭐ | `TaskMemoryManager`, `MemoryInjector` |
 | **Flow 8 — 📊 Request Logging** | debugging prompt pipelines | ⭐⭐⭐ | `WithLogger`, `WithMutatorLogger` |
+| **Flow 9 — 🔄 Durable Workflows** | persistent sessions + selective memory | ⭐⭐⭐⭐ | `SessionRunner`, persister, memory policies |
+| **Flow 10 — 🧭 Workflow-Owned Control** | bounded flows with deterministic steps | ⭐⭐⭐⭐ | dynamic tools, callbacks, final-answer gates |
 
 ---
 
@@ -684,6 +836,53 @@ Stored memories and injected text are sanitized before reuse, so prompt-injectio
 
 ---
 
+### Sequence: selective memory write
+
+Use this when some task outcomes are worth keeping long-term, but many are just noise.
+
+```mermaid
+sequenceDiagram
+    participant App as 👤 App
+    participant MM as 📚 TaskMemoryManager
+    participant P as 🎯 MemoryWritePolicy
+    participant VS as 🗂️ VectorStore
+
+    App->>MM: Save(TaskMemory)
+    MM->>P: Decide(memory)
+    alt high value
+        P-->>MM: ShouldStore=true
+        MM->>VS: Add(memory)
+        VS-->>MM: stored
+        MM-->>App: saved=true
+    else low value
+        P-->>MM: ShouldStore=false
+        MM-->>App: saved=false
+    end
+```
+
+Think of this as **memory budgeting**: keep the hard-won lessons, skip the trivia.
+
+```go
+memories := agent.NewTaskMemoryManager(
+    embedder,
+    agent.NewInMemoryVectorStore(),
+    agent.SimpleDuplicateChecker{},
+).WithWritePolicy(agent.NewThresholdMemoryWritePolicy(0.6))
+
+_, saved, err := memories.Save(ctx, agent.TaskMemory{
+    TaskSummary: "debug checkout timeout with retries",
+    Approach:    "trace logs, isolate retry loop, then patch",
+    FinalAnswer: "fixed with bounded retry backoff",
+    IsCorrect:   true,
+})
+if err != nil {
+    log.Fatal(err)
+}
+fmt.Println("saved:", saved)
+```
+
+---
+
 ### Flow 8 — 📊 Request Logging: see the mutator pipeline in action
 
 **Study this flow when:** you want to debug why a prompt got shorter, why memories were injected, or why an approval flow suspended.
@@ -743,16 +942,169 @@ clientWithPipelineLogs := agent.NewMutatingLLMClient(
 
 ---
 
+### Flow 9 — 🔄 Durable Workflows: persistent sessions, selective memory, and cache-friendly prompts
+
+**Study this flow when:** your agent must survive restarts, remember only useful lessons, and keep repeated prompt setup cheap.
+
+```mermaid
+sequenceDiagram
+    participant App as 👤 App / API
+    participant SR as 🧵 SessionRunner
+    participant PS as 💾 SessionPersister
+    participant MC as 🪄 MutatingLLMClient
+    participant SPD as 📍 StablePrefixDetector
+    participant AG as 🤖 Agent
+    participant MM as 📚 TaskMemoryManager
+    participant WP as 🎯 MemoryWritePolicy
+
+    App->>SR: Run(sessionID, userID, question)
+    SR->>PS: LoadSession(sessionID)
+    PS-->>SR: prior events + state
+    SR->>AG: replay and continue workflow
+    AG->>MC: Generate(request)
+    MC->>SPD: Detect stable prefix
+    SPD-->>MC: reusable prefix
+    MC-->>AG: optimized request
+    AG-->>SR: result
+    SR->>MM: Save(TaskMemory)
+    MM->>WP: Decide(memory value)
+    WP-->>MM: store or skip
+    SR->>PS: SaveSession(updated)
+    SR-->>App: result
+```
+
+This flow combines four ideas that often show up together in production:
+
+1. **Persistent sessions** keep the conversation alive across restarts or separate workers.
+2. **Selective memory writes** stop long-term memory from filling with low-value tasks.
+3. **Stable prefix detection** helps your LLM client identify the reusable part of a request for prompt-caching workflows.
+4. **Workflow composition** lets later turns depend on facts or state captured earlier in the same session.
+
+#### Persistent sessions
+
+`InMemorySessionManager` is great for local development. In production, swap in `NewPersistedSessionManager` so a restart does not erase the conversation.
+
+```go
+type myPersister struct{}
+
+func (p *myPersister) SaveSession(ctx context.Context, session agent.Session) error {
+    return saveToStore(ctx, session) // your DB, Redis, S3, etc.
+}
+
+func (p *myPersister) LoadSession(ctx context.Context, sessionID string) (agent.Session, error) {
+    return loadFromStore(ctx, sessionID)
+}
+
+sessions := agent.NewPersistedSessionManager(&myPersister{})
+runner := agent.NewSessionRunner(a, sessions, 8)
+```
+
+#### Stable prefixes and caching
+
+A **stable prefix** is the part of the request that barely changes across turns: instructions, fixed tool setup, and maybe the early session scaffold. If your provider supports prompt caching, this is the part you usually want to mark as reusable.
+
+Friendly example:
+
+- stable: `"You are a support assistant..."` + fixed tool definitions
+- unstable: the newest user message, fresh tool output, current turn state
+
+`react-agent` does not force one provider-specific caching implementation. It gives you the seam so your own LLM client can use the detected prefix.
+
+#### Workflow composition
+
+Treat `Session.State` like shared scratch space across turns.
+
+```go
+first, _ := runner.Run(ctx, "order-42", "user-9", "Find the root cause")
+session, _ := sessions.Get("order-42")
+session.State["root_cause"] = first.Output
+_ = sessions.Save(session)
+
+second, _ := runner.Run(ctx, "order-42", "user-9", "Propose the safest fix")
+_ = second
+```
+
+That pattern is what turns a chat session into a **multi-step workflow**.
+
+---
+
+### Flow 10 — 🧭 Workflow-Owned Control: deterministic phases inside an open-ended loop
+
+**Study this flow when:** your agent still benefits from ReAct, but some steps are too important, expensive, or risky to leave fully open-ended.
+
+Good examples:
+
+1. plan first, then force a conversion step
+2. switch to a fallback path after a permanent tool failure
+3. require supporting facts before the answer
+4. reject a final answer that ignores authoritative values already collected
+
+```mermaid
+sequenceDiagram
+    participant U as 👤 User
+    participant A as 🤖 Agent
+    participant D as 🧰 Dynamic tool callback
+    participant B as 🪝 Before/After callbacks
+    participant X as 🔧 ToolExecutor
+    participant F as ✅ Final answer gate
+
+    U->>A: "Run the bounded workflow"
+    A->>D: Which tools are visible now?
+    D-->>A: create_tasks only
+    A->>X: Execute(create_tasks)
+    B-->>A: move to direct conversion phase
+    A->>D: Which tools are visible now?
+    D-->>A: convert_units only
+    A->>X: Execute(convert_units)
+    B-->>A: unsupported conversion -> fallback phase
+    A->>D: Which tools are visible now?
+    D-->>A: research_conversion only
+    A->>X: Execute(research_conversion)
+    B-->>A: collect recovered facts
+    A->>F: Proposed final answer
+    F-->>A: accept or reject with corrective message
+    A-->>U: grounded final answer
+```
+
+This is the pattern we used for the Chapter 7-style adaptive workflow:
+
+- the **library** still owns the loop, history, callbacks, suspension, and resume
+- the **workflow** owns phases, allowed tools, fallback rules, circuit breakers, and grounding checks
+
+```go
+phaseTracker := newMyWorkflowStateMachine()
+
+a := agent.New(client, defs, executor).
+    WithDynamicToolsCallback(func(execCtx *agent.ExecutionContext) []model.ToolDefinition {
+        return phaseTracker.AllowedTools(defs)
+    }).
+    WithBeforeToolCallbacks(phaseTracker).
+    WithAfterToolCallbacks(phaseTracker).
+    WithFinalAnswerCallbacks(myWorkflowGate{tracker: phaseTracker})
+```
+
+**What to study here:**
+
+1. Use **dynamic tools** when the model should only see the tools that make sense in the current phase.
+2. Use **before/after callbacks** when the workflow needs to track failures, state transitions, or repeated bad behavior.
+3. Use a **final answer callback** when the answer must mention or rely on specific verified facts.
+4. Keep the workflow rules in your app code — `react-agent` gives you the seams, not one hardcoded business process.
+
+> 🙂 Friendly rule: let the model stay flexible where reasoning helps, but take the wheel for the steps that must be correct in the same way every time.
+
+---
+
 ## 🔗 Flow Combinations
 
 Real systems usually mix more than one flow:
 
 | Your use case | Combine these flows | Why |
 |---------------|---------------------|-----|
-| **Production chatbot** | Flow 3 + Flow 5 + Flow 6 | observe runs, persist turns, keep prompts small |
+| **Production chatbot** | Flow 3 + Flow 5 + Flow 6 + Flow 9 | observe runs, persist turns, keep prompts small, and save only useful lessons |
 | **Risky automation** | Flow 2 + Flow 4 + Flow 8 | use tools, gate them, log every decision |
 | **Research assistant** | Flow 2 + Flow 3 + Flow 7 | fetch evidence, inspect reasoning, reuse good prior work |
-| **Support agent** | Flow 5 + Flow 6 + Flow 7 | remember the conversation, manage token budget, learn from resolved cases |
+| **Support agent** | Flow 5 + Flow 6 + Flow 7 + Flow 9 | remember the conversation, manage token budget, learn from resolved cases, and survive restarts |
+| **Bounded adaptive workflow** | Flow 2 + Flow 3 + Flow 10 | let the model reason, but keep critical phases deterministic and grounded |
 
 > 🧩 The library is intentionally composable: sessions, approvals, mutators, memory, and event streams are designed to stack cleanly instead of forcing one giant framework.
 
@@ -907,6 +1259,7 @@ classDiagram
 | `SessionRunner` | 🧵 Conversation wrapper — replay, persist, resume |
 | `TaskMemoryManager` | 📚 Long-term memory store — save and search past tasks |
 | `ConfirmationCallback` | ✅ Human approval gate for selected tools |
+| `WithDynamicToolsCallback` | 🧰 Per-turn tool visibility — show only what this phase should allow |
 | `AgentEvent` | 📡 Sealed sum type — emitted on the observable stream |
 
 ---

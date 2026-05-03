@@ -11,16 +11,21 @@ import (
 	"github.com/v8tix/react-agent/model"
 )
 
+const deferredUserMessagesStateKey = "__deferred_user_messages"
+
 // Agent is the ReAct orchestrator. It runs a Think → Act → Observe loop until
 // the LLM produces a final answer or maxSteps is exhausted.
 type Agent struct {
-	llmClient           LLMClient
-	toolDefs            []model.ToolDefinition // definitions sent to the LLM each turn
-	executor            model.ToolExecutor     // nil is safe when toolDefs is empty
-	instructions        string
-	maxSteps            int
-	beforeToolCallbacks []BeforeToolCallback
-	afterToolCallbacks  []AfterToolCallback
+	llmClient            LLMClient
+	toolDefs             []model.ToolDefinition // default definitions sent to the LLM each turn
+	dynamicToolsCallback DynamicToolsCallback
+	executor             model.ToolExecutor // nil is safe when toolDefs is empty
+	instructions         string
+	maxSteps             int
+	liveEventSinks       []LiveEventSink
+	beforeToolCallbacks  []BeforeToolCallback
+	afterToolCallbacks   []AfterToolCallback
+	finalAnswerCallbacks []FinalAnswerCallback
 }
 
 // New creates an Agent with sensible defaults (maxSteps=10).
@@ -41,6 +46,9 @@ func New(client LLMClient, defs []model.ToolDefinition, executor model.ToolExecu
 	}
 }
 
+// DynamicToolsCallback can tailor the tool list visible to the LLM for the next turn.
+type DynamicToolsCallback func(*ExecutionContext) []model.ToolDefinition
+
 // WithInstructions sets the system prompt sent on every LLM request.
 func (a *Agent) WithInstructions(s string) *Agent {
 	a.instructions = s
@@ -57,6 +65,23 @@ func (a *Agent) WithMaxSteps(n int) *Agent {
 	return a
 }
 
+// WithLiveEventSink appends callbacks that receive agent events while the run is active.
+//
+// The replayable observable returned by Run/Resume remains unchanged; this hook is
+// for live logging, metrics, or tracing during execution.
+func (a *Agent) WithLiveEventSink(sinks ...LiveEventSink) *Agent {
+	a.liveEventSinks = append(a.liveEventSinks, sinks...)
+	return a
+}
+
+// WithDynamicToolsCallback overrides the tool definitions sent to the LLM for each turn.
+//
+// Returning nil or an empty slice hides all tools for that turn.
+func (a *Agent) WithDynamicToolsCallback(cb DynamicToolsCallback) *Agent {
+	a.dynamicToolsCallback = cb
+	return a
+}
+
 // WithBeforeToolCallbacks appends tool callbacks that run before executor dispatch.
 func (a *Agent) WithBeforeToolCallbacks(callbacks ...BeforeToolCallback) *Agent {
 	a.beforeToolCallbacks = append(a.beforeToolCallbacks, callbacks...)
@@ -69,15 +94,23 @@ func (a *Agent) WithAfterToolCallbacks(callbacks ...AfterToolCallback) *Agent {
 	return a
 }
 
+// WithFinalAnswerCallbacks appends callbacks that validate a proposed final
+// answer before the run is allowed to finish.
+func (a *Agent) WithFinalAnswerCallbacks(callbacks ...FinalAnswerCallback) *Agent {
+	a.finalAnswerCallbacks = append(a.finalAnswerCallbacks, callbacks...)
+	return a
+}
+
 // Run executes the full ReAct loop for a single user message.
 // It returns a Result, a replayable Observable of AgentEvents, and any error.
 //
 // The Observable is a cold, replayable stream: each call to Observe() replays
 // all events from the completed run. It is safe for multiple subscribers.
 func (a *Agent) Run(ctx context.Context, userMessage string) (*Result, rxgo.Observable, error) {
-	ch := make(chan AgentEvent, a.maxSteps*8+16)
+	ch, wait := startEventCollector(a.maxSteps, a.liveEventSinks...)
 	result, err := a.runCore(ctx, userMessage, ch)
-	return result, observableFromChannel(ch), err
+	close(ch)
+	return result, observableFromEvents(wait()), err
 }
 
 // runCore is the internal loop. It writes AgentEvents to ch (never closes it).
@@ -90,24 +123,27 @@ func (a *Agent) runCore(ctx context.Context, userMessage string, ch chan<- Agent
 
 // Resume continues a suspended run after an external interaction response arrives.
 func (a *Agent) Resume(ctx context.Context, suspended SuspendedRun, response InteractionResponse) (*Result, rxgo.Observable, error) {
-	ch := make(chan AgentEvent, a.maxSteps*8+16)
+	ch, wait := startEventCollector(a.maxSteps, a.liveEventSinks...)
 	execCtx := suspended.Context
 	pending, ok := execCtx.PendingInteraction()
 	if !ok {
 		err := fmt.Errorf("agent: resume requested without pending interaction")
 		emit(ch, RunEndEvent{RunID: execCtx.id, Err: err})
-		return nil, observableFromChannel(ch), err
+		close(ch)
+		return nil, observableFromEvents(wait()), err
 	}
 	if pending.ID != response.RequestID {
 		err := fmt.Errorf("agent: resume request id mismatch: want %s, got %s", pending.ID, response.RequestID)
 		emit(ch, RunEndEvent{RunID: execCtx.id, Err: err})
-		return nil, observableFromChannel(ch), err
+		close(ch)
+		return nil, observableFromEvents(wait()), err
 	}
 	execCtx.storeInteractionResponse(response)
 	execCtx.clearPendingInteraction()
 	emit(ch, InteractionResumedEvent{RunID: execCtx.id, Step: execCtx.currentStep, Response: response})
 	result, err := a.continueRun(ctx, execCtx, ch, true)
-	return result, observableFromChannel(ch), err
+	close(ch)
+	return result, observableFromEvents(wait()), err
 }
 
 func (a *Agent) continueRun(ctx context.Context, execCtx *ExecutionContext, ch chan<- AgentEvent, resumePendingAct bool) (*Result, error) {
@@ -158,12 +194,58 @@ func (a *Agent) continueRun(ctx context.Context, execCtx *ExecutionContext, ch c
 	return result, nil
 }
 
-func observableFromChannel(ch chan AgentEvent) rxgo.Observable {
-	close(ch)
-	collected := make([]AgentEvent, 0, len(ch))
-	for e := range ch {
-		collected = append(collected, e)
+type eventCollector struct {
+	ch        chan AgentEvent
+	done      chan []AgentEvent
+	liveSinks []LiveEventSink
+}
+
+// newEventCollector starts a background drain so event emission can continue even
+// when a run produces bursts of callback or policy events.
+func newEventCollector(bufferSize int, sinks ...LiveEventSink) *eventCollector {
+	if bufferSize < 1 {
+		bufferSize = 64
 	}
+	collector := &eventCollector{
+		ch:        make(chan AgentEvent, bufferSize),
+		done:      make(chan []AgentEvent, 1),
+		liveSinks: append([]LiveEventSink(nil), sinks...),
+	}
+	go collector.collect()
+	return collector
+}
+
+func (c *eventCollector) collect() {
+	collected := make([]AgentEvent, 0, cap(c.ch))
+	for event := range c.ch {
+		collected = append(collected, event)
+		for _, sink := range c.liveSinks {
+			if sink == nil {
+				continue
+			}
+			sink(event)
+		}
+	}
+	c.done <- collected
+}
+
+func (c *eventCollector) wait() []AgentEvent {
+	return <-c.done
+}
+
+// startEventCollector creates a concurrent event collector for a run.
+// The collector drains events while the run is active so callback-heavy flows do
+// not deadlock on a full buffer. Events are later replayed to callers through a
+// cold rxgo.Observable once the run completes.
+func startEventCollector(maxSteps int, sinks ...LiveEventSink) (chan AgentEvent, func() []AgentEvent) {
+	bufferSize := maxSteps*4 + 8
+	collector := newEventCollector(bufferSize, sinks...)
+	return collector.ch, collector.wait
+}
+
+// observableFromEvents wraps the finished event slice in a cold, replayable
+// observable so every Observe() call sees the same completed run history.
+func observableFromEvents(collected []AgentEvent) rxgo.Observable {
 	return rxgo.Defer([]rxgo.Producer{
 		func(_ context.Context, out chan<- rxgo.Item) {
 			for _, e := range collected {
@@ -182,6 +264,8 @@ func (a *Agent) Step(ctx context.Context, execCtx *ExecutionContext) error {
 }
 
 func (a *Agent) step(ctx context.Context, execCtx *ExecutionContext, ch chan<- AgentEvent) error {
+	ctx = context.WithValue(ctx, planningExecContextKey{}, execCtx)
+	ctx = context.WithValue(ctx, planningEventChannelKey{}, ch)
 	emit(ch, StepStartEvent{RunID: execCtx.id, Step: execCtx.currentStep})
 
 	resp, err := a.think(ctx, execCtx, ch)
@@ -193,6 +277,32 @@ func (a *Agent) step(ctx context.Context, execCtx *ExecutionContext, ch chan<- A
 	toolCalls := collectToolCalls(resp.Content)
 	if len(toolCalls) == 0 {
 		if msg := extractAssistantMessage(resp.Content); msg != "" {
+			for _, cb := range a.finalAnswerCallbacks {
+				start := time.Now()
+				if err := cb.BeforeFinalAnswer(ctx, execCtx, msg); err != nil {
+					execCtx.AddEvent("agent", model.Message{Role: "assistant", Content: msg})
+					emit(ch, PolicyEvent{
+						RunID:      execCtx.id,
+						Step:       execCtx.currentStep,
+						PolicyName: callbackName(cb),
+						Decision:   PolicyDecisionReject,
+						Answer:     msg,
+						Reason:     err.Error(),
+						Latency:    time.Since(start),
+					})
+					execCtx.AddEvent("user", model.Message{Role: "user", Content: err.Error()})
+					emit(ch, StepEndEvent{RunID: execCtx.id, Step: execCtx.currentStep})
+					return nil
+				}
+				emit(ch, PolicyEvent{
+					RunID:      execCtx.id,
+					Step:       execCtx.currentStep,
+					PolicyName: callbackName(cb),
+					Decision:   PolicyDecisionAccept,
+					Answer:     msg,
+					Latency:    time.Since(start),
+				})
+			}
 			execCtx.AddEvent("agent", model.Message{Role: "assistant", Content: msg})
 			execCtx.setFinalResult(msg)
 		}
@@ -318,6 +428,9 @@ func (a *Agent) resumeAct(ctx context.Context, execCtx *ExecutionContext, ch cha
 		resultItems[i] = tr
 	}
 	execCtx.AddEvent("tools", resultItems...)
+	for _, msg := range flushDeferredUserMessages(execCtx) {
+		execCtx.AddEvent("user", model.Message{Role: "user", Content: msg})
+	}
 	execCtx.clearPendingAct()
 	return nil
 }
@@ -466,6 +579,45 @@ func normalizeToolResult(call model.ToolCall, result model.ToolResult) model.Too
 	return result
 }
 
+// QueueDeferredUserMessage schedules a user message to be appended after the
+// current tool result event finishes. Use this from callbacks that need to steer
+// the next LLM turn without breaking the event ordering invariants of the run.
+func QueueDeferredUserMessage(execCtx *ExecutionContext, content string) {
+	if execCtx == nil || content == "" {
+		return
+	}
+	raw, ok := execCtx.GetState(deferredUserMessagesStateKey)
+	if !ok || raw == nil {
+		execCtx.SetState(deferredUserMessagesStateKey, []string{content})
+		return
+	}
+	msgs, ok := raw.([]string)
+	if !ok {
+		execCtx.SetState(deferredUserMessagesStateKey, []string{content})
+		return
+	}
+	msgs = append(msgs, content)
+	execCtx.SetState(deferredUserMessagesStateKey, msgs)
+}
+
+func flushDeferredUserMessages(execCtx *ExecutionContext) []string {
+	if execCtx == nil {
+		return nil
+	}
+	raw, ok := execCtx.GetState(deferredUserMessagesStateKey)
+	if !ok || raw == nil {
+		return nil
+	}
+	msgs, ok := raw.([]string)
+	if !ok || len(msgs) == 0 {
+		execCtx.SetState(deferredUserMessagesStateKey, nil)
+		return nil
+	}
+	out := append([]string(nil), msgs...)
+	execCtx.SetState(deferredUserMessagesStateKey, nil)
+	return out
+}
+
 // emit sends an AgentEvent to ch. If ch is nil, it is a no-op.
 // It never blocks: the channel buffer is always sized to hold all events for a run.
 func emit(ch chan<- AgentEvent, event AgentEvent) {
@@ -478,8 +630,19 @@ func (a *Agent) prepareRequest(execCtx *ExecutionContext) model.Request {
 	return model.Request{
 		Instructions: a.instructions,
 		Events:       execCtx.Events(),
-		Tools:        a.toolDefs,
+		Tools:        a.toolDefinitionsForTurn(execCtx),
 	}
+}
+
+func (a *Agent) toolDefinitionsForTurn(execCtx *ExecutionContext) []model.ToolDefinition {
+	if a.dynamicToolsCallback == nil {
+		return a.toolDefs
+	}
+	defs := a.dynamicToolsCallback(execCtx)
+	if len(defs) == 0 {
+		return nil
+	}
+	return append([]model.ToolDefinition(nil), defs...)
 }
 
 func extractAssistantMessage(items []model.ContentItem) string {
