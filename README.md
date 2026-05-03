@@ -1066,7 +1066,7 @@ sequenceDiagram
     A-->>U: grounded final answer
 ```
 
-This is the pattern we used for the Chapter 7-style adaptive workflow:
+This is the pattern we used for a bounded adaptive workflow:
 
 - the **library** still owns the loop, history, callbacks, suspension, and resume
 - the **workflow** owns phases, allowed tools, fallback rules, circuit breakers, and grounding checks
